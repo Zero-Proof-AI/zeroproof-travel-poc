@@ -114,7 +114,7 @@ async fn main() -> anyhow::Result<()> {
     let sp1_verifier_addr = std::env::var("SP1_VERIFIER_ADDRESS")
         .unwrap_or_else(|_| "0x53A9038dCB210D210A7C973fA066Fd2C50aa8847".to_string()); // Sepolia SP1 v5.2.4 Groth16 verifier (universal)
     let rpc_url = std::env::var("RPC_URL")
-        .unwrap_or_else(|_| "http://json-rpc.9lmur1sx205wod4wavn42kr8r.blockchainnodeengine.com/?key=AIzaSyBanzf369uxM4kL0EHhXh5HSZpk3J8_4nA".to_string());
+        .unwrap_or_else(|_| "http://localhost:8545".to_string());
 
     // 1. Call Agent B to get the price
     println!("→ Calling Agent B at {}", agent_b_url);
