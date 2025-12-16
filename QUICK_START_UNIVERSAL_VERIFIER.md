@@ -116,18 +116,6 @@ SP1VerifierGroth16.verifyProof(bytes32 vkHash, bytes proof) → bool
 3. **On-Chain Verification**: Working end-to-end
 4. **Error Handling**: Proper revert detection in agent-a
 
-### 🔧 Key Fix
-Changed from trying to parse boolean result to detecting contract reverts:
-```rust
-// Before: tried to decode result as bool ❌
-// After: check error first (revert = failure), success = valid ✅
-if let Some(error) = response.get("error") {
-    // Contract reverted = proof invalid
-} else if let Some(_result) = response.get("result") {
-    // No revert = proof valid!
-}
-```
-
 ## Environment Variables
 
 All services have sensible defaults. Override if needed:
