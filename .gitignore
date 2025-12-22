@@ -37,6 +37,11 @@ Thumbs.db
 /sp1-verifier-deploy/cache/
 /sp1-verifier-deploy/broadcast/
 /sp1-verifier-deploy/.git/
+/contracts/lib/
+/contracts/out/
+/contracts/cache/
+/contracts/broadcast/
+/contracts/.git/
 /zk-attestation-service/lib/
 /zk-attestation-service/out/
 /zk-attestation-service/cache/

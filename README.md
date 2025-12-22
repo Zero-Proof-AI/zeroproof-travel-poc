@@ -102,5 +102,3 @@ Universal Verifier (Sepolia) → Success!
 - **Proof size**: 260 bytes
 
 ---
-
-**See `QUICK_START_UNIVERSAL_VERIFIER.md` for complete setup →**

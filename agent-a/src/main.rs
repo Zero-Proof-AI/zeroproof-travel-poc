@@ -12,15 +12,16 @@ struct PricingInput {
 }
 
 /// Helper to call the pre-deployed SP1VerifierGroth16 contract using JSON-RPC
-/// Uses the universal verifier pattern: vk_hash is passed as a parameter, not stored on-chain
+/// Verifies proof on-chain using ZeroProof entry point contract
+/// ZeroProof supports multiple proof types (SP1 zkVM, Reclaim zkTLS, etc.)
 async fn verify_on_chain(
-    sp1_verifier_addr: &str,
+    zeroproof_addr: &str,
     rpc_url: &str,
     proof_hex: &str,
     public_values_hex: &str,
     vk_hash: &str,
 ) -> anyhow::Result<bool> {
-    println!("\n→ Verifying proof on-chain with SP1VerifierGroth16 at {}", sp1_verifier_addr);
+    println!("\n→ Verifying proof on-chain with ZeroProof at {}", zeroproof_addr);
     
     // Decode proof, public values, and VK hash
     let proof_bytes = hex::decode(proof_hex.strip_prefix("0x").unwrap_or(proof_hex))?;
@@ -31,32 +32,50 @@ async fn verify_on_chain(
         return Err(anyhow::anyhow!("VK hash must be 32 bytes, got {}", vk_hash_bytes.len()));
     }
     
-    // Build encoded call data for verifyProof(bytes32 programVKey, bytes calldata publicValues, bytes calldata proofBytes)
-    // Using ethers ABI encoding
-    let vk_hash_token = ethers::abi::Token::FixedBytes(vk_hash_bytes);
-    let public_values_token = ethers::abi::Token::Bytes(public_values_bytes);
-    let proof_token = ethers::abi::Token::Bytes(proof_bytes);
-    let encoded = ethers::abi::encode(&[vk_hash_token, public_values_token, proof_token]);
+    // Build ZeroProof.verifyProof(bytes32 proofType, bytes calldata proof, Claim calldata claim)
+    // For SP1 proofs: proofType = keccak256("sp1-zkvm")
+    let proof_type = ethers::core::utils::keccak256(b"sp1-zkvm");
+    
+    // SP1 proof format: encode(vkey, publicValues, proofBytes)
+    let sp1_proof = {
+        let vk_token = ethers::abi::Token::FixedBytes(vk_hash_bytes.clone());
+        let pv_token = ethers::abi::Token::Bytes(public_values_bytes.clone());
+        let proof_token = ethers::abi::Token::Bytes(proof_bytes.clone());
+        ethers::abi::encode(&[vk_token, pv_token, proof_token])
+    };
+    
+    // Claim structure: (address agent, bytes32 claimType, bytes publicData, bytes32 dataHash)
+    let claim = {
+        let agent = ethers::abi::Token::Address(ethers::types::Address::zero()); // Agent B address (could be passed)
+        let claim_type = ethers::abi::Token::FixedBytes(ethers::core::utils::keccak256(b"pricing").to_vec());
+        let public_data = ethers::abi::Token::Bytes(public_values_bytes.clone());
+        let data_hash = ethers::abi::Token::FixedBytes(ethers::core::utils::keccak256(&public_values_bytes).to_vec());
+        ethers::abi::Token::Tuple(vec![agent, claim_type, public_data, data_hash])
+    };
+    
+    // Encode function call: verifyProof(bytes32,bytes,(address,bytes32,bytes,bytes32))
+    let proof_type_token = ethers::abi::Token::FixedBytes(proof_type.to_vec());
+    let proof_token = ethers::abi::Token::Bytes(sp1_proof);
+    let encoded = ethers::abi::encode(&[proof_type_token, proof_token, claim]);
 
-    // Function selector for verifyProof(bytes32,bytes,bytes)
-    // keccak256("verifyProof(bytes32,bytes,bytes)") = 0x41493c60
-    let fn_selector = [0x41, 0x49, 0x3c, 0x60];
+    // Function selector for verifyProof(bytes32,bytes,(address,bytes32,bytes,bytes32))
+    let fn_selector = &ethers::core::utils::keccak256(b"verifyProof(bytes32,bytes,(address,bytes32,bytes,bytes32))")[..4];
     let mut call_data = fn_selector.to_vec();
     call_data.extend(encoded);
     let call_data_hex = format!("0x{}", hex::encode(&call_data));
 
+    println!("  Proof Type: sp1-zkvm ({})", hex::encode(&proof_type));
     println!("  VK Hash: {}", vk_hash);
     println!("  Public Values ({} bytes): {}...", public_values_hex.len() / 2, &public_values_hex[..std::cmp::min(66, public_values_hex.len())]);
     println!("  Proof ({} bytes / {} hex): {}...", proof_hex.len() / 2, proof_hex.len(), &proof_hex[..std::cmp::min(66, proof_hex.len())]);
-    println!("  Expected: 4 bytes (VERIFIER_HASH) + 256 bytes (8 * uint256) = 260 bytes total");
 
-    // Use JSON-RPC eth_call to the universal verifier
+    // Use JSON-RPC eth_call to ZeroProof contract
     let payload = serde_json::json!({
         "jsonrpc": "2.0",
         "method": "eth_call",
         "params": [
             {
-                "to": sp1_verifier_addr,
+                "to": zeroproof_addr,
                 "data": call_data_hex,
             },
             "latest"
@@ -111,10 +130,10 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| "http://localhost:8001".to_string());
     let attester_url = std::env::var("ATTESTER_URL")
         .unwrap_or_else(|_| "http://localhost:8000".to_string());
-    let sp1_verifier_addr = std::env::var("SP1_VERIFIER_ADDRESS")
-        .unwrap_or_else(|_| "0x53A9038dCB210D210A7C973fA066Fd2C50aa8847".to_string()); // Sepolia SP1 v5.2.4 Groth16 verifier (universal)
+    let zeroproof_addr = std::env::var("ZEROPROOF_ADDRESS")
+        .unwrap_or_else(|_| "0x9C33252D29B41Fe2706704a8Ca99E8731B58af41".to_string()); // Sepolia ZeroProof entry point
     let rpc_url = std::env::var("RPC_URL")
-        .unwrap_or_else(|_| "http://localhost:8545".to_string());
+        .unwrap_or_else(|_| "http://json-rpc.9lmur1sx205wod4wavn42kr8r.blockchainnodeengine.com/?key=AIzaSyBanzf369uxM4kL0EHhXh5HSZpk3J8_4nA".to_string());
 
     // 1. Call Agent B to get the price
     println!("→ Calling Agent B at {}", agent_b_url);
@@ -184,8 +203,8 @@ async fn main() -> anyhow::Result<()> {
 
     println!("✅ Off-chain proof verified!");
 
-    // 3. Optional: verify proof on-chain using pre-deployed SP1VerifierGroth16
-    if let verifier_addr = sp1_verifier_addr {
+    // 3. Optional: verify proof on-chain using ZeroProof entry point
+    if let verifier_addr = zeroproof_addr {
         match verify_on_chain(&verifier_addr, &rpc_url, &attest_resp.proof, &attest_resp.public_values, &attest_resp.vk_hash).await {
             Ok(true) => {
                 println!("\n✅ On-chain verification SUCCESS! Response data is cryptographically valid.");
