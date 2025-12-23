@@ -1,0 +1,24 @@
+{
+  "claimData": {
+    "provider": "http",
+    "parameters": "{\"body\":\"\",\"method\":\"GET\",\"responseMatches\":[{\"type\":\"regex\",\"value\":\"\\\"booking_id\\\"\\\\s*:\\\\s*\\\"(?<booking_id>[^\\\"]+)\\\"\"}],\"responseRedactions\":[{\"jsonPath\":\"$.args\"}],\"url\":\"https://httpbin.org/get?booking_id=AA12345&credit_card=4111-1111-1111-1111&amount=500\"}",
+    "owner": "0x6202d6e4b1c98f4e7e22d7b969dec142aa282ec6",
+    "timestampS": 1766531039,
+    "context": "{\"extractedParameters\":{\"booking_id\":\"AA12345\"},\"providerHash\":\"0xc36571eeb1158b880ad5b90bedf509e1241f2474a37ecd81d53e9e3cbee9f19e\"}",
+    "identifier": "0xfd3dfbc8763cd0cbef66f4d7d3aa55fa6f27e1fbd132efe738a39b77c0b0fcc3",
+    "epoch": 1
+  },
+  "identifier": "0xfd3dfbc8763cd0cbef66f4d7d3aa55fa6f27e1fbd132efe738a39b77c0b0fcc3",
+  "signatures": [
+    "0x20a354aede8a454c8e5c6960b6098ba38f06d1ffab2a79ed968407cf3c662a7438ac5fbb27bfefaf06eb7e37591ba1f192bf4d6fe2a6a836e45b9424ced24cc71c"
+  ],
+  "extractedParameterValues": {
+    "booking_id": "AA12345"
+  },
+  "witnesses": [
+    {
+      "id": "0x244897572368eadf65bfbc5aec98d8e5443a9072",
+      "url": "wss://attestor.reclaimprotocol.org:444/ws"
+    }
+  ]
+}

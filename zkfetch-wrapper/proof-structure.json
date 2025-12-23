@@ -1,0 +1,24 @@
+{
+  "claimData": {
+    "provider": "http",
+    "parameters": "{\"body\":\"\",\"headers\":{\"User-Agent\":\"reclaim/0.0.1\",\"accept\":\"application/json\"},\"method\":\"GET\",\"responseMatches\":[{\"type\":\"regex\",\"value\":\"\\\"origin\\\":\\\\s*\\\"(?<origin>[^\\\"]+)\\\"\"}],\"responseRedactions\":[],\"url\":\"https://httpbin.org/get\"}",
+    "owner": "0x6202d6e4b1c98f4e7e22d7b969dec142aa282ec6",
+    "timestampS": 1766522917,
+    "context": "{\"extractedParameters\":{\"origin\":\"3.110.82.84\"},\"providerHash\":\"0x245a11f715ca085fabe2986526a51e43f286650f992dde2d036daf2f16fc1370\"}",
+    "identifier": "0x2bd1cc71a31100fe3e6137cd6d19cde93d371047827bb0f13f66572e191cd82e",
+    "epoch": 1
+  },
+  "identifier": "0x2bd1cc71a31100fe3e6137cd6d19cde93d371047827bb0f13f66572e191cd82e",
+  "signatures": [
+    "0xe80ef0465974cc8d2a5803ddc0995f25c13a1c199cce9660d40773d3f863da2b54671cec969ddf74bb1976113649ad774e0eee16a24e12f9820d60fc85d3c57a1b"
+  ],
+  "extractedParameterValues": {
+    "origin": "3.110.82.84"
+  },
+  "witnesses": [
+    {
+      "id": "0x244897572368eadf65bfbc5aec98d8e5443a9072",
+      "url": "wss://attestor.reclaimprotocol.org:444/ws"
+    }
+  ]
+}
