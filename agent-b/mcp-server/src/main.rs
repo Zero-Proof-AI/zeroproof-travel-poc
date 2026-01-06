@@ -100,6 +100,7 @@ fn tool_error(error: String) -> ToolResponse<()> {
 
 /// List all available tools
 async fn list_tools() -> Json<ToolsResponse> {
+    tracing::info!("[LIST TOOLS] Received request to list available tools");
     Json(ToolsResponse {
         tools: vec![
             ToolDefinition {
@@ -158,8 +159,11 @@ async fn list_tools() -> Json<ToolsResponse> {
 async fn get_ticket_price(
     Json(req): Json<PriceRequest>,
 ) -> Result<Json<ToolResponse<PriceResponse>>, (StatusCode, Json<ToolResponse<()>>)> {
+    tracing::info!("[GET-TICKET-PRICE] Tool call received: from={}, to={}, vip={:?}", req.from, req.to, req.vip);
+    
     // Validate input
     if req.from.is_empty() || req.to.is_empty() {
+        tracing::warn!("[GET-TICKET-PRICE] Validation failed: missing required fields");
         return Err((
             StatusCode::BAD_REQUEST,
             Json(tool_error(
@@ -176,6 +180,8 @@ async fn get_ticket_price(
     };
 
     let core_resp = pricing::handle(core_req);
+    
+    tracing::info!("[GET-TICKET-PRICE] Successfully calculated price: ${} (vip={})", core_resp.price, req.vip.unwrap_or(false));
 
     Ok(Json(ToolResponse::ok(PriceResponse {
         price: core_resp.price,
@@ -190,8 +196,11 @@ async fn get_ticket_price(
 async fn book_flight(
     Json(req): Json<BookRequest>,
 ) -> Result<Json<ToolResponse<BookResponse>>, (StatusCode, Json<ToolResponse<()>>)> {
+    tracing::info!("[BOOK-FLIGHT] Tool call received: from={}, to={}, passenger={}, email={}", req.from, req.to, req.passenger_name, req.passenger_email);
+    
     // Validate input
     if req.from.is_empty() || req.to.is_empty() || req.passenger_name.is_empty() {
+        tracing::warn!("[BOOK-FLIGHT] Validation failed: missing required fields");
         return Err((
             StatusCode::BAD_REQUEST,
             Json(tool_error(
@@ -209,6 +218,8 @@ async fn book_flight(
     };
 
     let core_resp = pricing_core::booking::handle(core_req);
+    
+    tracing::info!("[BOOK-FLIGHT] Successfully booked flight: booking_id={}, confirmation_code={}, status={}", core_resp.booking_id, core_resp.confirmation_code, core_resp.status);
 
     Ok(Json(ToolResponse::ok(BookResponse {
         booking_id: core_resp.booking_id,

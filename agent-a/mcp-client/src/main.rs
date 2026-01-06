@@ -504,11 +504,23 @@ async fn main() -> Result<()> {
                                     let mut enrollment_complete = false;
                                     let mut payment_confirmed = false;
                                     let mut pricing_result = None;
+                                    let mut trip_from = "".to_string();
+                                    let mut trip_to = "".to_string();
                                     
                                     for (tool_name, arguments) in &tool_calls {
                                         // Non-payment tools
                                         if !tool_name.contains("enroll") && !tool_name.contains("purchase") && !tool_name.contains("retrieve") {
                                             println!("→ Invoking: {} with args {}", tool_name, arguments);
+
+                                            // Extract from/to from pricing tool arguments
+                                            if tool_name == "get-ticket-price" {
+                                                if let Some(from_val) = arguments.get("from").and_then(|v| v.as_str()) {
+                                                    trip_from = from_val.to_string();
+                                                }
+                                                if let Some(to_val) = arguments.get("to").and_then(|v| v.as_str()) {
+                                                    trip_to = to_val.to_string();
+                                                }
+                                            }
 
                                             match call_server_tool(
                                                 &client,
@@ -539,7 +551,7 @@ async fn main() -> Result<()> {
                                     if let Some(pricing) = pricing_result {
                                         if let Ok(parsed) = serde_json::from_str::<Value>(&pricing) {
                                             if let Some(price) = parsed.get("price") {
-                                                println!("Agent A: Great! I found a flight from NYC to London for ${}.", price);
+                                                println!("Agent A: Great! I found a flight from {} to {} for ${}.", trip_from, trip_to, price);
                                                 println!("Agent A: This includes all taxes and fees.\n");
                                                 
                                                 // Ask user if they want to proceed
@@ -758,14 +770,14 @@ async fn main() -> Result<()> {
                                                             }
                                                             
                                                             if payment_confirmed {
-                                                                show_success("Payment confirmed! Your booking is complete!");
+                                                                show_success("Payment confirmed! Now I am going to complete your booking!");
                                                                 
                                                                 // Now call book-flight with passenger details
                                                                 show_step(3, 3, "Completing your flight booking...");
                                                                 
                                                                 let book_args = json!({
-                                                                    "from": "NYC",
-                                                                    "to": "LON",
+                                                                    "from": trip_from,
+                                                                    "to": trip_to,
                                                                     "passenger_name": passenger_name,
                                                                     "passenger_email": passenger_email
                                                                 });
@@ -787,7 +799,7 @@ async fn main() -> Result<()> {
                                                                         if let Ok(booking) = serde_json::from_str::<Value>(&result) {
                                                                             if let Some(conf_code) = booking.get("confirmation_code").and_then(|c| c.as_str()) {
                                                                                 show_success("Flight booking confirmed!");
-                                                                                println!("Agent A: Your flight booking from NYC to London has been confirmed.\n");
+                                                                                println!("Agent A: Your flight booking from {} to {} has been confirmed.\n", trip_from, trip_to);
                                                                                 println!("Agent A: Confirmation code: {}\n", conf_code);
                                                                                 println!("Agent A: You'll receive a confirmation email shortly with your flight details and receipt.\n");
                                                                             }

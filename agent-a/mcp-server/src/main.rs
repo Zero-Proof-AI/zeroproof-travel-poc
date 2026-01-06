@@ -115,7 +115,7 @@ impl AgentAMcp {
     /// Call a tool and return result
     async fn call_tool(&self, name: &str, arguments: Value) -> Result<Value> {
         match name {
-            "call_agent_b" => {
+            "get_ticket_price" => {
                 let from = arguments
                     .get("from")
                     .and_then(|v| v.as_str())
