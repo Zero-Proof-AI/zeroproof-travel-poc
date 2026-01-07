@@ -38,7 +38,7 @@ EXPOSE 3030
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:3030/tools || exit 1
+    CMD curl -f http://localhost:3030/health || exit 1
 
 # Run the MCP server
 CMD ["/app/agent-b-mcp-server"]

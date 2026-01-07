@@ -98,6 +98,11 @@ fn tool_error(error: String) -> ToolResponse<()> {
     }
 }
 
+/// Health check endpoint
+async fn health() -> Json<serde_json::json_internal::ValueRepr> {
+    Json(json!({"status": "healthy"}))
+}
+
 /// List all available tools
 async fn list_tools() -> Json<ToolsResponse> {
     tracing::info!("[LIST TOOLS] Received request to list available tools");
@@ -244,6 +249,7 @@ async fn main() -> Result<()> {
 
     // Build router
     let app = Router::new()
+        .route("/health", get(health))
         .route("/tools", get(list_tools))
         .route("/tools/get-ticket-price", post(get_ticket_price))
         .route("/tools/book-flight", post(book_flight))
