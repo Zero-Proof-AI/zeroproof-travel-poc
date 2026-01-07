@@ -99,7 +99,7 @@ fn tool_error(error: String) -> ToolResponse<()> {
 }
 
 /// Health check endpoint
-async fn health() -> Json<serde_json::json_internal::ValueRepr> {
+async fn health() -> Json<serde_json::Value> {
     Json(json!({"status": "healthy"}))
 }
 
