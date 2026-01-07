@@ -22,6 +22,9 @@ anyhow = "1.0"
 # Environment variables
 dotenv = "0.15"
 
-# Logging
+# Logging utilities
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# Base64 encoding for proxy authentication
+base64 = "0.22"
