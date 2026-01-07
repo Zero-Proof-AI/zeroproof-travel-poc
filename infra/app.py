@@ -2,6 +2,8 @@
 import os
 import aws_cdk as cdk
 from agent_b_mcp_server_stack import AgentBMCPSStack
+from agent_a_mcp_server_stack import AgentAMCPServerStack
+from agent_a_mcp_client_stack import AgentAMCPClientStack
 
 env = cdk.Environment(
     account="940333627479",
@@ -10,9 +12,18 @@ env = cdk.Environment(
 
 app = cdk.App()
 
-# env=cdk.Environment(account=os.getenv('CDK_DEFAULT_ACCOUNT'), 
-# region=os.getenv('CDK_DEFAULT_REGION')),
+# Deploy Agent B MCP Server
 AgentBMCPSStack(app, "AgentBMCPSStack",
+    env=env,
+)
+
+# Deploy Agent A MCP Server
+AgentAMCPServerStack(app, "AgentAMCPServerStack",
+    env=env,
+)
+
+# Deploy Agent A MCP Client
+AgentAMCPClientStack(app, "AgentAMCPClientStack",
     env=env,
 )
 
