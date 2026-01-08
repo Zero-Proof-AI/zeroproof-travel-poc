@@ -116,7 +116,7 @@ async fn chat(
     // Process the user query with full conversation history and state
     println!("[PROCESSING] Starting orchestration - User message: '{}'", &payload.message[..payload.message.len().min(100)]);
     
-    match process_user_query(&config, &payload.message, &session.messages, &mut session.state).await {
+    match process_user_query(&config, &payload.message, &session.messages, &mut session.state, &session_id).await {
         Ok((response, updated_messages, updated_state)) => {
             // Update session with new messages and state
             let message_count = updated_messages.len();

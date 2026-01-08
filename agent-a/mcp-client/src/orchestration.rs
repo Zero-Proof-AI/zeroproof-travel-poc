@@ -41,12 +41,13 @@ pub struct ContentBlock {
 /// Booking state tracking across multi-turn conversations
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BookingState {
-    pub step: String, // "initial", "pricing", "passenger_details", "payment", "completed"
+    pub step: String, // "initial", "pricing", "passenger_details", "payment_method", "enrollment_confirmation", "payment", "completed"
     pub from: String,
     pub to: String,
     pub price: f64,
     pub passenger_name: Option<String>,
     pub passenger_email: Option<String>,
+    pub payment_method: Option<String>, // "visa", "other", etc.
     pub enrollment_token_id: Option<String>,
     pub instruction_id: Option<String>,
     pub vip: bool,
@@ -61,6 +62,7 @@ impl Default for BookingState {
             price: 0.0,
             passenger_name: None,
             passenger_email: None,
+            payment_method: None,
             enrollment_token_id: None,
             instruction_id: None,
             vip: false,
@@ -499,6 +501,7 @@ pub async fn call_server_tool(
 /// Complete a flight booking with payment processing
 pub async fn complete_booking_with_payment(
     config: &AgentConfig,
+    session_id: &str,
     from: &str,
     to: &str,
     price: f64,
@@ -516,7 +519,7 @@ pub async fn complete_booking_with_payment(
         None
     };
 
-    let session_id = "sess_user_123".to_string();
+    let session_id = session_id.to_string();
     let mut enrollment_token_id = "token_789".to_string();
     let mut enrollment_complete = false;
 
@@ -698,6 +701,7 @@ pub async fn process_user_query(
     user_query: &str,
     messages: &[ClaudeMessage],
     state: &mut BookingState,
+    session_id: &str,
 ) -> Result<(String, Vec<ClaudeMessage>, BookingState)> {
     let client = reqwest::Client::new();
 
@@ -837,16 +841,42 @@ pub async fn process_user_query(
                             return Ok((response, updated_messages, state.clone()));
                         }
                         
-                        // We just received passenger details (Turn 2). Ask for enrollment confirmation.
+                        // We just received passenger details (Turn 2). Ask for payment method selection.
                         if state.step == "pricing" && !passenger_name.is_empty() && !passenger_email.is_empty() {
-                            // Update state to passenger_details to track that we're now waiting for enrollment confirmation
-                            state.step = "enrollment_confirmation".to_string();
+                            // Update state to passenger_details to track that we're waiting for payment method selection
+                            state.step = "payment_method".to_string();
                             state.passenger_name = Some(passenger_name.clone());
                             state.passenger_email = Some(passenger_email.clone());
                             
                             let response = format!(
-                                "Agent A: Great! I have your details:\n- Name: {}\n- Email: {}\n\nTo complete this booking, I'll need to enroll your payment card with biometric authentication.\n\nReady to proceed with payment enrollment?",
+                                "Agent A: Great! I have your details:\n- Name: {}\n- Email: {}\n\nHow would you like to pay?\n1. Visa Credit Card\n2. Other payment method\n\nPlease reply with your choice (1 or 2).",
                                 passenger_name, passenger_email
+                            );
+                            updated_messages.push(ClaudeMessage {
+                                role: "assistant".to_string(),
+                                content: response.clone(),
+                            });
+                            return Ok((response, updated_messages, state.clone()));
+                        }
+                        
+                        // User selected payment method (Turn 3). Ask for enrollment confirmation.
+                        if state.step == "payment_method" {
+                            let payment_method = user_query.trim().to_lowercase();
+                            let selected_method = if payment_method.contains("1") || payment_method.contains("visa") {
+                                "Visa Credit Card"
+                            } else if payment_method.contains("2") || payment_method.contains("other") {
+                                "Visa Credit Card" // Default to Visa if other selected (as per main.rs logic)
+                            } else {
+                                "Visa Credit Card" // Default to Visa
+                            };
+                            
+                            // Update state with payment method
+                            state.step = "enrollment_confirmation".to_string();
+                            state.payment_method = Some(selected_method.to_string());
+                            
+                            let response = format!(
+                                "Agent A: Perfect! I'll set up your {} for this transaction.\n\nTo complete this booking, I'll need to enroll your payment card with biometric authentication.\n\nReady to proceed with payment enrollment?",
+                                selected_method
                             );
                             updated_messages.push(ClaudeMessage {
                                 role: "assistant".to_string(),
@@ -868,6 +898,7 @@ pub async fn process_user_query(
 
                             match complete_booking_with_payment(
                                 config,
+                                session_id,
                                 &from,
                                 &to,
                                 price,
