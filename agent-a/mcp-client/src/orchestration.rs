@@ -723,6 +723,80 @@ pub async fn process_user_query(
     // Build updated message list
     let mut updated_messages = messages.to_vec();
     
+    // FIRST: Check state machine for controlled flow (before tool parsing)
+    // This ensures the booking workflow progresses correctly regardless of Claude's response
+    if state.step == "pricing" {
+        // After pricing, ask for passenger name
+        state.step = "passenger_name".to_string();
+        let response = "Agent A: Great! I found your flight. To complete the booking, I'll need some information.\n\n📝 Step 1: Full Name\n\nWhat is your full name?".to_string();
+        updated_messages.push(ClaudeMessage {
+            role: "assistant".to_string(),
+            content: response.clone(),
+        });
+        return Ok((response, updated_messages, state.clone()));
+    }
+    
+    // Extract name and email for state machine checks
+    let passenger_name = if let Some(name) = &state.passenger_name {
+        name.clone()
+    } else {
+        extract_passenger_name(user_query).unwrap_or_else(|| String::new())
+    };
+    
+    let passenger_email = if let Some(email) = &state.passenger_email {
+        email.clone()
+    } else {
+        extract_email(user_query).unwrap_or_else(|| String::new())
+    };
+    
+    // User provided name, now ask for email
+    if state.step == "passenger_name" && !passenger_name.is_empty() {
+        state.passenger_name = Some(passenger_name.clone());
+        state.step = "passenger_email".to_string();
+        let response = format!(
+            "Agent A: Perfect! Got it - {}.\n\n📧 Step 2: Email Address\n\nWhat is your email address?",
+            passenger_name
+        );
+        updated_messages.push(ClaudeMessage {
+            role: "assistant".to_string(),
+            content: response.clone(),
+        });
+        return Ok((response, updated_messages, state.clone()));
+    } else if state.step == "passenger_name" && passenger_name.is_empty() {
+        // Couldn't extract name, ask again
+        let response = "Agent A: I couldn't understand your name. Could you please provide your full name?".to_string();
+        updated_messages.push(ClaudeMessage {
+            role: "assistant".to_string(),
+            content: response.clone(),
+        });
+        return Ok((response, updated_messages, state.clone()));
+    }
+    
+    // User provided email, now ask for payment method
+    if state.step == "passenger_email" && !passenger_email.is_empty() {
+        state.passenger_email = Some(passenger_email.clone());
+        state.step = "payment_method".to_string();
+        let passenger_name = state.passenger_name.clone().unwrap_or_default();
+        
+        let response = format!(
+            "Agent A: Excellent! I have your details:\n- Name: {}\n- Email: {}\n\n💳 Step 3: Payment Method\n\nHow would you like to pay for this ${} flight?\n1. Visa Credit Card\n2. Other payment method\n\nPlease reply with 1 or 2.",
+            passenger_name, passenger_email, state.price as i32
+        );
+        updated_messages.push(ClaudeMessage {
+            role: "assistant".to_string(),
+            content: response.clone(),
+        });
+        return Ok((response, updated_messages, state.clone()));
+    } else if state.step == "passenger_email" && passenger_email.is_empty() {
+        // Couldn't extract email, ask again
+        let response = "Agent A: I couldn't find a valid email address. Please provide your email (e.g., user@example.com):".to_string();
+        updated_messages.push(ClaudeMessage {
+            role: "assistant".to_string(),
+            content: response.clone(),
+        });
+        return Ok((response, updated_messages, state.clone()));
+    }
+    
     // Parse tool calls
     match parse_tool_calls(&claude_response) {
         Ok(tool_calls) => {
@@ -815,86 +889,11 @@ pub async fn process_user_query(
                         .any(|(name, _)| name == "enroll-card" || name == "initiate-purchase-instruction" || name == "book-flight");
 
                     if is_booking_with_payment {
-                        // Check if we already have passenger details in the state (Turn 2) or just got them (Turn 2+)
-                        let passenger_name = if let Some(name) = &state.passenger_name {
-                            name.clone()
-                        } else {
-                            extract_passenger_name(user_query).unwrap_or_else(|| String::new())
-                        };
+                        // Payment method selection and enrollment
+                        let payment_method = user_query.trim().to_lowercase();
                         
-                        let passenger_email = if let Some(email) = &state.passenger_email {
-                            email.clone()
-                        } else {
-                            extract_email(user_query).unwrap_or_else(|| String::new())
-                        };
-                        
-                        // After pricing, ask for passenger full name (Turn 2)
-                        if state.step == "pricing" {
-                            state.step = "passenger_name".to_string();
-                            let response = "Agent A: Great! I found your flight. To complete the booking, I'll need some information.\n\n📝 Step 1: Full Name\n\nWhat is your full name?".to_string();
-                            updated_messages.push(ClaudeMessage {
-                                role: "assistant".to_string(),
-                                content: response.clone(),
-                            });
-                            return Ok((response, updated_messages, state.clone()));
-                        }
-                        
-                        // User provided name, now ask for email (Turn 3)
-                        if state.step == "passenger_name" {
-                            if !passenger_name.is_empty() {
-                                state.passenger_name = Some(passenger_name.clone());
-                                state.step = "passenger_email".to_string();
-                                let response = format!(
-                                    "Agent A: Perfect! Got it - {}.\n\n📧 Step 2: Email Address\n\nWhat is your email address?",
-                                    passenger_name
-                                );
-                                updated_messages.push(ClaudeMessage {
-                                    role: "assistant".to_string(),
-                                    content: response.clone(),
-                                });
-                                return Ok((response, updated_messages, state.clone()));
-                            } else {
-                                // Couldn't extract name, ask again
-                                let response = "Agent A: I couldn't understand your name. Could you please provide your full name?".to_string();
-                                updated_messages.push(ClaudeMessage {
-                                    role: "assistant".to_string(),
-                                    content: response.clone(),
-                                });
-                                return Ok((response, updated_messages, state.clone()));
-                            }
-                        }
-                        
-                        // User provided email, now ask for payment method (Turn 4)
-                        if state.step == "passenger_email" {
-                            if !passenger_email.is_empty() {
-                                state.passenger_email = Some(passenger_email.clone());
-                                state.step = "payment_method".to_string();
-                                let passenger_name = state.passenger_name.clone().unwrap_or_default();
-                                
-                                let response = format!(
-                                    "Agent A: Excellent! I have your details:\n- Name: {}\n- Email: {}\n\n💳 Step 3: Payment Method\n\nHow would you like to pay for this ${} flight?\n1. Visa Credit Card\n2. Other payment method\n\nPlease reply with 1 or 2.",
-                                    passenger_name, passenger_email, state.price as i32
-                                );
-                                updated_messages.push(ClaudeMessage {
-                                    role: "assistant".to_string(),
-                                    content: response.clone(),
-                                });
-                                return Ok((response, updated_messages, state.clone()));
-                            } else {
-                                // Couldn't extract email, ask again
-                                let response = "Agent A: I couldn't find a valid email address. Please provide your email (e.g., user@example.com):".to_string();
-                                updated_messages.push(ClaudeMessage {
-                                    role: "assistant".to_string(),
-                                    content: response.clone(),
-                                });
-                                return Ok((response, updated_messages, state.clone()));
-                            }
-                        }
-                        
-                        // User selected payment method (Turn 5). Ask for enrollment confirmation.
+                        // User selected payment method. Ask for enrollment confirmation.
                         if state.step == "payment_method" {
-                            let payment_method = user_query.trim().to_lowercase();
-                            
                             // Check if user actually responded to payment method question
                             if !payment_method.contains("1") && !payment_method.contains("2") 
                                 && !payment_method.contains("visa") && !payment_method.contains("other")
