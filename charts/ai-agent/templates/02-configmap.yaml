@@ -6,10 +6,28 @@ metadata:
   labels:
     app: ai-agent
 data:
+  nginx.conf: |
+    server {
+      listen 3000;
+      server_name localhost;
+
+      root /usr/share/nginx/html;
+      index index.html;
+
+      # Cache busting for static assets
+      location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+          expires 1y;
+          add_header Cache-Control "public, immutable";
+      }
+
+      # Fallback to index.html for React routing
+      location / {
+          try_files $uri /index.html =404;
+      }
+    }
+  env.js: |
+    window.env = {
+      REACT_APP_BACKEND_API: "http://agent-a-http:3001/chat"
+    };
   NODE_ENV: development
   PORT: "3001"
-  AGENT_A_MODE: http
-  AGENT_A_SERVER_URL: http://localhost:3001
-  AGENT_B_MCP_URL: https://dev.agentb.zeroproofai.com
-  PAYMENT_AGENT_URL: https://dev.justpay.zeroproofai.com
-  PAYMENT_AGENT_ENABLED: "true"

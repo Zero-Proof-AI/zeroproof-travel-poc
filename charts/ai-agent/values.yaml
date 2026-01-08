@@ -5,7 +5,7 @@
 replicaCount: 1
 
 image:
-  repository: "940333627479.dkr.ecr.us-east-1.amazonaws.com/ai-agent"  # Will be set to the ECR image URI
+  repository: "940333627479.dkr.ecr.us-east-1.amazonaws.com/ai-agent-web"  # Will be set to the ECR image URI
   pullPolicy: Always
   tag: "latest"
 
@@ -68,3 +68,8 @@ nodeSelector: {}
 tolerations: []
 
 affinity: {}
+
+volumes:
+  - name: config
+    configMap:
+      name: ai-agent-config
