@@ -736,65 +736,96 @@ pub async fn process_user_query(
         return Ok((response, updated_messages, state.clone()));
     }
     
-    // Extract name and email for state machine checks
-    let passenger_name = if let Some(name) = &state.passenger_name {
-        name.clone()
-    } else {
-        extract_passenger_name(user_query).unwrap_or_else(|| String::new())
-    };
-    
-    let passenger_email = if let Some(email) = &state.passenger_email {
-        email.clone()
-    } else {
-        extract_email(user_query).unwrap_or_else(|| String::new())
+    // Extract name and email using Claude's understanding
+    let extract_passenger_info = async |step: &str, user_input: &str| -> Result<(Option<String>, Option<String>)> {
+        let extraction_prompt = match step {
+            "passenger_name" => format!(
+                "Extract the passenger's full name from this user input: \"{}\"\n\nRespond with ONLY the name, nothing else. If no name is provided, respond with: NONE",
+                user_input
+            ),
+            "passenger_email" => format!(
+                "Extract the email address from this user input: \"{}\"\n\nRespond with ONLY the email address, nothing else. If no email is provided, respond with: NONE",
+                user_input
+            ),
+            _ => return Ok((None, None)),
+        };
+
+        let client = reqwest::Client::new();
+        let claude_extraction = call_claude(
+            &client,
+            config,
+            &extraction_prompt,
+            &[],
+            state,
+            &json!({}),
+        ).await.unwrap_or_default();
+
+        let trimmed = claude_extraction.trim();
+        if trimmed.to_uppercase() == "NONE" || trimmed.is_empty() {
+            Ok((None, None))
+        } else {
+            match step {
+                "passenger_name" => Ok((Some(trimmed.to_string()), None)),
+                "passenger_email" => Ok((None, Some(trimmed.to_string()))),
+                _ => Ok((None, None)),
+            }
+        }
     };
     
     // User provided name, now ask for email
-    if state.step == "passenger_name" && !passenger_name.is_empty() {
-        state.passenger_name = Some(passenger_name.clone());
-        state.step = "passenger_email".to_string();
-        let response = format!(
-            "Agent A: Perfect! Got it - {}.\n\n📧 Step 2: Email Address\n\nWhat is your email address?",
-            passenger_name
-        );
-        updated_messages.push(ClaudeMessage {
-            role: "assistant".to_string(),
-            content: response.clone(),
-        });
-        return Ok((response, updated_messages, state.clone()));
-    } else if state.step == "passenger_name" && passenger_name.is_empty() {
-        // Couldn't extract name, ask again
-        let response = "Agent A: I couldn't understand your name. Could you please provide your full name?".to_string();
-        updated_messages.push(ClaudeMessage {
-            role: "assistant".to_string(),
-            content: response.clone(),
-        });
-        return Ok((response, updated_messages, state.clone()));
+    if state.step == "passenger_name" {
+        let (extracted_name, _) = extract_passenger_info("passenger_name", user_query).await?;
+        
+        if let Some(name) = extracted_name {
+            state.passenger_name = Some(name.clone());
+            state.step = "passenger_email".to_string();
+            let response = format!(
+                "Agent A: Perfect! Got it - {}.\n\n📧 Step 2: Email Address\n\nWhat is your email address?",
+                name
+            );
+            updated_messages.push(ClaudeMessage {
+                role: "assistant".to_string(),
+                content: response.clone(),
+            });
+            return Ok((response, updated_messages, state.clone()));
+        } else {
+            // Couldn't extract name, ask again
+            let response = "Agent A: I couldn't understand that. Could you please provide your full name?".to_string();
+            updated_messages.push(ClaudeMessage {
+                role: "assistant".to_string(),
+                content: response.clone(),
+            });
+            return Ok((response, updated_messages, state.clone()));
+        }
     }
     
     // User provided email, now ask for payment method
-    if state.step == "passenger_email" && !passenger_email.is_empty() {
-        state.passenger_email = Some(passenger_email.clone());
-        state.step = "payment_method".to_string();
-        let passenger_name = state.passenger_name.clone().unwrap_or_default();
+    if state.step == "passenger_email" {
+        let (_, extracted_email) = extract_passenger_info("passenger_email", user_query).await?;
         
-        let response = format!(
-            "Agent A: Excellent! I have your details:\n- Name: {}\n- Email: {}\n\n💳 Step 3: Payment Method\n\nHow would you like to pay for this ${} flight?\n1. Visa Credit Card\n2. Other payment method\n\nPlease reply with 1 or 2.",
-            passenger_name, passenger_email, state.price as i32
-        );
-        updated_messages.push(ClaudeMessage {
-            role: "assistant".to_string(),
-            content: response.clone(),
-        });
-        return Ok((response, updated_messages, state.clone()));
-    } else if state.step == "passenger_email" && passenger_email.is_empty() {
-        // Couldn't extract email, ask again
-        let response = "Agent A: I couldn't find a valid email address. Please provide your email (e.g., user@example.com):".to_string();
-        updated_messages.push(ClaudeMessage {
-            role: "assistant".to_string(),
-            content: response.clone(),
-        });
-        return Ok((response, updated_messages, state.clone()));
+        if let Some(email) = extracted_email {
+            state.passenger_email = Some(email.clone());
+            state.step = "payment_method".to_string();
+            let passenger_name = state.passenger_name.clone().unwrap_or_default();
+            
+            let response = format!(
+                "Agent A: Excellent! I have your details:\n- Name: {}\n- Email: {}\n\n💳 Step 3: Payment Method\n\nHow would you like to pay for this ${} flight?\n1. Visa Credit Card\n2. Other payment method\n\nPlease reply with 1 or 2.",
+                passenger_name, email, state.price as i32
+            );
+            updated_messages.push(ClaudeMessage {
+                role: "assistant".to_string(),
+                content: response.clone(),
+            });
+            return Ok((response, updated_messages, state.clone()));
+        } else {
+            // Couldn't extract email, ask again
+            let response = "Agent A: I couldn't find a valid email. Please provide your email address (e.g., user@example.com):".to_string();
+            updated_messages.push(ClaudeMessage {
+                role: "assistant".to_string(),
+                content: response.clone(),
+            });
+            return Ok((response, updated_messages, state.clone()));
+        }
     }
     
     // Parse tool calls
@@ -1048,32 +1079,71 @@ pub async fn process_user_query(
 
 /// Helper: Extract passenger name from user message
 fn extract_passenger_name(message: &str) -> Option<String> {
-    // Simple extraction - looks for patterns like "name is ...", "I'm ...", etc
-    if let Some(pos) = message.to_lowercase().find("name is ") {
-        let after = &message[pos + 8..];
+    let trimmed = message.trim();
+    
+    // Skip if message is just asking a question or giving other responses
+    if trimmed.to_lowercase().contains("what is") 
+        || trimmed.to_lowercase().contains("can you")
+        || trimmed.to_lowercase().contains("could you")
+        || trimmed.len() < 2 {
+        return None;
+    }
+    
+    // First try explicit patterns
+    if let Some(pos) = trimmed.to_lowercase().find("name is ") {
+        let after = &trimmed[pos + 8..];
         if let Some(end) = after.find('\n') {
             return Some(after[..end].trim().to_string());
         }
         return Some(after.trim().to_string());
     }
     
-    if let Some(pos) = message.to_lowercase().find("i'm ") {
-        let after = &message[pos + 4..];
+    if let Some(pos) = trimmed.to_lowercase().find("i'm ") {
+        let after = &trimmed[pos + 4..];
         if let Some(end) = after.find('\n') {
             return Some(after[..end].trim().to_string());
         }
-        return Some(after.trim().split_whitespace().next().unwrap_or("").to_string());
+        return Some(after.trim().to_string());
+    }
+    
+    // If no pattern found and message looks like a name (2-3 words, all alphabetic or spaces/hyphens)
+    // Accept it as a name
+    let words: Vec<&str> = trimmed.split_whitespace().collect();
+    if words.len() >= 1 && words.len() <= 5 {
+        // Check if all words are alphabetic (allowing hyphens for names like Mary-Jane)
+        let is_likely_name = words.iter().all(|word| {
+            word.chars().all(|c| c.is_alphabetic() || c == '-' || c == '\'')
+        });
+        
+        if is_likely_name {
+            return Some(trimmed.to_string());
+        }
     }
     
     None
 }
 
+
 /// Helper: Extract email from user message
 fn extract_email(message: &str) -> Option<String> {
-    // Simple regex-like extraction for email pattern
-    for word in message.split_whitespace() {
-        if word.contains('@') && word.contains('.') {
-            return Some(word.trim_end_matches(',').trim_end_matches('.').to_string());
+    let trimmed = message.trim();
+    
+    // Skip if message is a question
+    if trimmed.to_lowercase().contains("what is") 
+        || trimmed.to_lowercase().contains("can you")
+        || trimmed.len() < 5 {
+        return None;
+    }
+    
+    // Look for email pattern: word@word.word
+    for word in trimmed.split(|c: char| c.is_whitespace() || c == ',' || c == '.' || c == ';') {
+        let word = word.trim();
+        if word.contains('@') && word.contains('.') && word.len() > 5 {
+            // Remove trailing punctuation
+            let clean = word.trim_end_matches(',').trim_end_matches('.').trim_end_matches(';');
+            if clean.len() > 5 && clean.contains('@') {
+                return Some(clean.to_string());
+            }
         }
     }
     None
