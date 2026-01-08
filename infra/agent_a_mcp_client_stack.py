@@ -11,6 +11,10 @@ from cdk_ecr_deployment import ECRDeployment, DockerImageName
 
 
 class AgentAMCPClientStack(Stack):
+    """
+    Agent A HTTP Server Stack
+    Builds and deploys the HTTP server for Agent A's multi-turn conversation API
+    """
 
     def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)

@@ -126,7 +126,7 @@ async fn main() -> anyhow::Result<()> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(7200))
         .build()?;
-    let agent_b_url = std::env::var("AGENT_B_URL")
+    let agent_b_url = std::env::var("AGENT_B_MCP_URL")
         .unwrap_or_else(|_| "http://localhost:8001".to_string());
     let attester_url = std::env::var("ATTESTER_URL")
         .unwrap_or_else(|_| "http://localhost:8000".to_string());

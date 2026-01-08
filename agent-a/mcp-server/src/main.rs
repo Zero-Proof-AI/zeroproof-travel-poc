@@ -39,7 +39,7 @@ impl AgentAMcp {
     fn new() -> Self {
         Self {
             agent_b_url: Arc::new(
-                std::env::var("AGENT_B_URL")
+                std::env::var("AGENT_B_MCP_URL")
                     .unwrap_or_else(|_| "http://localhost:8001".to_string()),
             ),
             attester_url: Arc::new(
