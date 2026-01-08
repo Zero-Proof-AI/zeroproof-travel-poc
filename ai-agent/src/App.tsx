@@ -7,9 +7,19 @@ const ChatInterface: React.FC = () => {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [sessionId, setSessionId] = useState<string>('');
+  const messagesEndRef = React.useRef<HTMLDivElement>(null);
 
   // Hardcoded backend URL for now - point to Agent A HTTP Server
   const backendApiUrl = 'https://dev.agenta.zeroproofai.com/chat';
+
+  // Auto-scroll to bottom when messages change
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  React.useEffect(() => {
+    scrollToBottom();
+  }, [messages, loading]);
 
   // Generate session ID on component mount
   React.useEffect(() => {
@@ -97,6 +107,7 @@ const ChatInterface: React.FC = () => {
               Agent is thinking...
             </div>
           )}
+          <div ref={messagesEndRef} style={{ minHeight: '1px' }} />
         </div>
       </main>
 
