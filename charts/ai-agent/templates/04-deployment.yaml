@@ -36,21 +36,22 @@ spec:
               containerPort: 3000
               protocol: TCP
           env:
-            - name: NODE_ENV
+            - name: ENVIRONMENT
               valueFrom:
                 configMapKeyRef:
                   name: ai-agent-config
-                  key: NODE_ENV
+                  key: ENVIRONMENT
             - name: PORT
               valueFrom:
                 configMapKeyRef:
                   name: ai-agent-config
                   key: PORT
-            
+            - name: REACT_APP_BACKEND_API
+              valueFrom:
+                configMapKeyRef:
+                  name: ai-agent-config
+                  key: REACT_APP_BACKEND_API
           volumeMounts:
-            - name: config
-              subPath: env.js
-              mountPath: /usr/share/nginx/html/config/env.js
             - name: config
               subPath: nginx.conf
               mountPath: /etc/nginx/conf.d/default.conf

@@ -8,40 +8,8 @@ const ChatInterface: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [sessionId, setSessionId] = useState<string>('');
 
-  // Point to Agent A HTTP Server (mcp-client-http)
-  // Uses environment variable from ConfigMap (mounted at /config/env.js), falls back to build-time env or localhost
-  const getBackendUrl = () => {
-    // @ts-ignore - window.env is set by ConfigMap at runtime
-    if (window.env?.REACT_APP_BACKEND_API) {
-      // @ts-ignore
-      return window.env.REACT_APP_BACKEND_API;
-    }
-    return process.env.REACT_APP_BACKEND_API || 'http://localhost:3001/chat';
-  };
-  
-  const [backendApiUrl, setBackendApiUrl] = React.useState('http://localhost:3001/chat');
-
-  // Load backend URL from ConfigMap config file or fallback to environment variable
-  React.useEffect(() => {
-    const loadConfig = async () => {
-      try {
-        // Try to load config from ConfigMap-mounted file
-        const response = await fetch('/config/env.js');
-        if (response.ok) {
-          // Config file loaded successfully, window.env should be set
-          setBackendApiUrl(getBackendUrl());
-        } else {
-          // Fall back to environment variable or localhost
-          setBackendApiUrl(getBackendUrl());
-        }
-      } catch (error) {
-        // Fall back to environment variable or localhost
-        setBackendApiUrl(getBackendUrl());
-      }
-    };
-
-    loadConfig();
-  }, []);
+  // Hardcoded backend URL for now - point to Agent A HTTP Server
+  const backendApiUrl = 'https://dev.agenta.zeroproofai.com/chat';
 
   // Generate session ID on component mount
   React.useEffect(() => {
@@ -72,7 +40,7 @@ const ChatInterface: React.FC = () => {
       console.error('Error sending message:', error);
       const errorMessage = {
         role: 'assistant',
-        content: 'Error: Could not reach the backend service. Make sure mcp-client-http is running on port 3001.',
+        content: 'Error: Could not reach the backend service. Make sure mcp-client-http is running.',
       };
       setMessages((prev) => [...prev, errorMessage]);
     } finally {
