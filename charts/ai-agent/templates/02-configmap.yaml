@@ -1,0 +1,15 @@
+## 310-geth-configmap.yml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ai-agent-config
+  labels:
+    app: ai-agent
+data:
+  NODE_ENV: development
+  PORT: "3001"
+  AGENT_A_MODE: http
+  AGENT_A_SERVER_URL: http://localhost:3001
+  AGENT_B_MCP_URL: https://dev.agentb.zeroproofai.com
+  PAYMENT_AGENT_URL: https://dev.justpay.zeroproofai.com
+  PAYMENT_AGENT_ENABLED: "true"

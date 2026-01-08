@@ -1,19 +1,12 @@
 # Stage 1: Build the React app
 FROM node:20-bookworm AS builder
 
-WORKDIR /app
+# Copy the entire workspace structure to handle dependencies correctly
+COPY . /workspace
+WORKDIR /workspace/ai-agent
 
-# Copy package files
-COPY package*.json ./
-
-# Install dependencies
-RUN npm install --prefer-offline --no-audit
-
-# Copy source code
-COPY . .
-
-# Build the React app
-RUN npm run build
+# Install dependencies and build
+RUN npm install --prefer-offline --no-audit && npm run build
 
 # Stage 2: Serve with nginx
 FROM nginx:1.27-bookworm-perl
@@ -42,8 +35,7 @@ RUN echo 'server { \
 }' > /etc/nginx/conf.d/default.conf
 
 # Copy built app from builder stage
-COPY --from=builder /app/build /usr/share/nginx/html
-
+    COPY --from=builder /workspace/ai-agent/build /usr/share/nginx/html
 # Expose port 3000
 EXPOSE 3000
 
