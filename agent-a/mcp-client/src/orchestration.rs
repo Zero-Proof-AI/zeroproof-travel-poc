@@ -1042,91 +1042,6 @@ pub async fn process_user_query(
     }
 }
 
-/// Helper: Extract passenger name from user message
-fn extract_passenger_name(message: &str) -> Option<String> {
-    let trimmed = message.trim();
-    
-    // Skip if message is just asking a question or giving other responses
-    if trimmed.to_lowercase().contains("what is") 
-        || trimmed.to_lowercase().contains("can you")
-        || trimmed.to_lowercase().contains("could you")
-        || trimmed.len() < 2 {
-        return None;
-    }
-    
-    // First try explicit patterns
-    if let Some(pos) = trimmed.to_lowercase().find("name is ") {
-        let after = &trimmed[pos + 8..];
-        if let Some(end) = after.find('\n') {
-            return Some(after[..end].trim().to_string());
-        }
-        return Some(after.trim().to_string());
-    }
-    
-    if let Some(pos) = trimmed.to_lowercase().find("i'm ") {
-        let after = &trimmed[pos + 4..];
-        if let Some(end) = after.find('\n') {
-            return Some(after[..end].trim().to_string());
-        }
-        return Some(after.trim().to_string());
-    }
-    
-    // If no pattern found and message looks like a name (2-3 words, all alphabetic or spaces/hyphens)
-    // Accept it as a name
-    let words: Vec<&str> = trimmed.split_whitespace().collect();
-    if words.len() >= 1 && words.len() <= 5 {
-        // Check if all words are alphabetic (allowing hyphens for names like Mary-Jane)
-        let is_likely_name = words.iter().all(|word| {
-            word.chars().all(|c| c.is_alphabetic() || c == '-' || c == '\'')
-        });
-        
-        if is_likely_name {
-            return Some(trimmed.to_string());
-        }
-    }
-    
-    None
-}
-
-
-/// Helper: Extract email from user message
-fn extract_email(message: &str) -> Option<String> {
-    let trimmed = message.trim();
-    
-    // Skip if message is a question
-    if trimmed.to_lowercase().contains("what is") 
-        || trimmed.to_lowercase().contains("can you")
-        || trimmed.len() < 5 {
-        return None;
-    }
-    
-    // Look for email pattern: word@word.word
-    for word in trimmed.split(|c: char| c.is_whitespace() || c == ',' || c == '.' || c == ';') {
-        let word = word.trim();
-        if word.contains('@') && word.contains('.') && word.len() > 5 {
-            // Remove trailing punctuation
-            let clean = word.trim_end_matches(',').trim_end_matches('.').trim_end_matches(';');
-            if clean.len() > 5 && clean.contains('@') {
-                return Some(clean.to_string());
-            }
-        }
-    }
-    None
-}
-
-/// Helper: Extract from city from message
-#[allow(dead_code)]
-fn extract_from_route(message: &str) -> Option<String> {
-    // Try to find "from" pattern
-    let lower = message.to_lowercase();
-    if let Some(pos) = lower.find("from ") {
-        let after = &message[pos + 5..];
-        if let Some(to_pos) = after.to_lowercase().find(" to ") {
-            return Some(after[..to_pos].trim().to_string());
-        }
-    }
-    None
-}
 /// Helper: Extract information from user input using Claude's understanding
 async fn extract_with_claude(
     client: &reqwest::Client,
@@ -1163,19 +1078,4 @@ async fn extract_with_claude(
     } else {
         Ok(trimmed.to_string())
     }
-}
-/// Helper: Extract to city from message
-/// Helper: Extract to city from message
-#[allow(dead_code)]
-fn extract_to_route(message: &str) -> Option<String> {
-    // Try to find "to" pattern
-    let lower = message.to_lowercase();
-    if let Some(pos) = lower.find(" to ") {
-        let after = &message[pos + 4..];
-        if let Some(end) = after.find(|c: char| !c.is_alphabetic() && c != ' ') {
-            return Some(after[..end].trim().to_string());
-        }
-        return Some(after.split_whitespace().next().unwrap_or("").to_string());
-    }
-    None
 }
