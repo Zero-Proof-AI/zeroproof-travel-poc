@@ -174,25 +174,29 @@ pub fn build_tool_options_map() -> ToolOptionsMap {
     );
 
     // book-flight: Passenger booking - redact PII
-    // Masks passenger identification information in response
+    // Reveals ONLY: booking_id, confirmation_code, status
+    // Hides: passenger_name, from, to, and other details
     let mut book_flight_paths = std::collections::HashMap::new();
-    book_flight_paths.insert("passenger_name".to_string(), "$.data.passenger_name".to_string());
+    book_flight_paths.insert("booking_id".to_string(), "$.data.booking_id".to_string());
     
     map.insert(
         "book-flight".to_string(),
         ZkfetchToolOptions {
             public_options: None,
             private_options: None,
+            // Select ONLY the fields we want to reveal - everything else is redacted
             redactions: Some(vec![
-                // Only redact response data - request body is not in zkfetch response
-                json!({"jsonPath": "$.data.passenger_name"}),
+                json!({"jsonPath": "$.data.booking_id"}),
+                json!({"jsonPath": "$.data.confirmation_code"}),
+                json!({"jsonPath": "$.data.status"}),
             ]),
             response_redaction_paths: Some(book_flight_paths),
         },
     );
 
     // enroll-card: Payment card enrollment - redact card details
-    // Masks sensitive payment card information in response
+    // Reveals ONLY: tokenId
+    // Hides: all card information
     let mut enroll_card_paths = std::collections::HashMap::new();
     enroll_card_paths.insert("tokenId".to_string(), "$.data.tokenId".to_string());
     
@@ -201,8 +205,8 @@ pub fn build_tool_options_map() -> ToolOptionsMap {
         ZkfetchToolOptions {
             public_options: None,
             private_options: None,
+            // Select ONLY the token ID - everything else is redacted
             redactions: Some(vec![
-                // Only redact response data - request body is not in zkfetch response
                 json!({"jsonPath": "$.data.tokenId"}),
             ]),
             response_redaction_paths: Some(enroll_card_paths),
@@ -210,7 +214,8 @@ pub fn build_tool_options_map() -> ToolOptionsMap {
     );
 
     // initiate-purchase-instruction: Payment initiation - redact transaction details
-    // Masks financial transaction details in response
+    // Reveals ONLY: instructionId
+    // Hides: amount, tokenId, and other sensitive transaction details
     let mut purchase_paths = std::collections::HashMap::new();
     purchase_paths.insert("instructionId".to_string(), "$.data.instructionId".to_string());
     
@@ -219,8 +224,8 @@ pub fn build_tool_options_map() -> ToolOptionsMap {
         ZkfetchToolOptions {
             public_options: None,
             private_options: None,
+            // Select ONLY the instruction ID - everything else is redacted
             redactions: Some(vec![
-                // Only redact response data - request body is not in zkfetch response
                 json!({"jsonPath": "$.data.instructionId"}),
             ]),
             response_redaction_paths: Some(purchase_paths),
@@ -1579,17 +1584,17 @@ mod tests {
     fn test_build_tool_options_map_book_flight_redactions() {
         let tool_map = build_tool_options_map();
         
-        // book-flight should redact passenger PII
+        // book-flight should reveal only booking confirmation details
         let booking_opts = tool_map.get("book-flight").unwrap();
         assert!(booking_opts.redactions.is_some());
         
         let redactions = booking_opts.redactions.as_ref().unwrap();
         assert!(!redactions.is_empty());
         
-        // Verify response redaction paths
+        // Verify response redaction paths (fields to reveal)
         assert!(booking_opts.response_redaction_paths.is_some());
         let paths = booking_opts.response_redaction_paths.as_ref().unwrap();
-        assert!(paths.contains_key("passenger_name"));
+        assert!(paths.contains_key("booking_id"));
     }
 
     #[test]
