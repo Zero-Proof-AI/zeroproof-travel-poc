@@ -429,24 +429,76 @@ impl ProxyFetch {
         // Resolve tool-specific ZK options
         let zk_options = self.resolve_tool_options(&tool_name);
 
+        // Extract hidden parameters and convert to paramValues
+        let mut final_body = body.unwrap_or(Value::Null);
+        let mut private_options = zk_options.private_options.clone().unwrap_or_else(|| json!({}));
+        
+        // Parse body if it's a string (likely from JSON serialization)
+        if let Value::String(body_str) = &final_body {
+            if let Ok(parsed) = serde_json::from_str::<Value>(body_str) {
+                final_body = parsed;
+            }
+        }
+        
+        // Extract hidden parameters
+        if let Some(body_obj) = final_body.as_object_mut() {
+            if let Some(private_opts) = private_options.as_object_mut() {
+                if let Some(Value::Array(hidden_params)) = private_opts.get("hiddenParameters") {
+                    let hidden_params = hidden_params.clone();
+                    let mut param_values = serde_json::Map::new();
+                    
+                    for param in hidden_params.iter() {
+                        if let Value::String(param_name) = param {
+                            if let Some(value) = body_obj.remove(param_name) {
+                                param_values.insert(param_name.clone(), value);
+                                let placeholder = format!("{{{{{}}}}}", param_name);
+                                body_obj.insert(param_name.clone(), Value::String(placeholder));
+                            }
+                        }
+                    }
+                    
+                    if !param_values.is_empty() {
+                        private_opts.insert("paramValues".to_string(), Value::Object(param_values));
+                        private_opts.remove("hideRequestBody");
+                        private_opts.remove("hiddenParameters");
+                    }
+                }
+            }
+        }
+
         // Build zkfetch payload
         let zkfetch_payload = json!({
             "url": url,
-            "method": method,
             "publicOptions": {
+                "method": method,
                 "headers": {"Content-Type": "application/json"},
-                "body": body.unwrap_or(Value::Null).to_string(),
+                "body": final_body.to_string(),
                 "timeout": zk_options.public_options
                     .as_ref()
                     .and_then(|o| o.get("timeout").cloned())
                     .unwrap_or(json!(30000))
             },
-            "privateOptions": zk_options.private_options.unwrap_or(Value::Null),
+            "privateOptions": private_options,
             "redactions": zk_options.redactions.unwrap_or_default()
         });
 
         if self.config.debug {
-            tracing::debug!("zkfetch payload: {}", serde_json::to_string_pretty(&zkfetch_payload)?);
+            tracing::info!("📦 Final zkfetch payload structure:");
+            tracing::info!("  URL: {}", url);
+            tracing::info!("  Method: {}", method);
+            tracing::info!("  Public body: {}", zkfetch_payload.get("publicOptions").and_then(|o| o.get("body")).map(|b| b.to_string()).unwrap_or_default());
+            
+            // Log privateOptions structure
+            if let Some(private_opts) = zkfetch_payload.get("privateOptions") {
+                tracing::info!("  Private options keys: {:?}", private_opts.as_object().map(|o| o.keys().collect::<Vec<_>>()).unwrap_or_default());
+                if let Some(pv) = private_opts.get("paramValues") {
+                    tracing::info!("  ✓ paramValues present: {} keys", pv.as_object().map(|o| o.len()).unwrap_or(0));
+                } else {
+                    tracing::warn!("  ✗ paramValues NOT in privateOptions!");
+                }
+            }
+            
+            tracing::debug!("Full payload: {}", serde_json::to_string_pretty(&zkfetch_payload)?);
         }
 
         // POST to zkfetch-wrapper

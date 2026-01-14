@@ -15,7 +15,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
 
-use mcp_client::{AgentConfig, BookingState, ClaudeMessage, process_user_query, ProofDatabase, StoredProof, submit_proof_to_database};
+use mcp_client::{AgentConfig, BookingState, ClaudeMessage, process_user_query, ProofDatabase, StoredProof};
 
 /// Session data storing conversation history and booking state
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -330,9 +330,9 @@ async fn get_proofs(
                          proof.workflow_stage);
                 
                 // Log raw proof structure for verification
-                if let Ok(proof_str) = serde_json::to_string_pretty(&proof.proof) {
-                    println!("[PROOF] Raw ZK-TLS proof structure:\n{}", proof_str);
-                }
+                // if let Ok(proof_str) = serde_json::to_string_pretty(&proof.proof) {
+                //     println!("[PROOF] Raw ZK-TLS proof structure:\n{}", proof_str);
+                // }
             }
             
             // Create verification metadata for cross-agent verification

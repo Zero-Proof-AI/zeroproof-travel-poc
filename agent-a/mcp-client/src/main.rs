@@ -42,6 +42,7 @@ struct ClaudeMessage {
 struct ClaudeResponse {
     content: Vec<ContentBlock>,
     #[serde(default)]
+    #[allow(dead_code)]
     stop_reason: String,
 }
 
@@ -479,6 +480,7 @@ fn ask_confirmation_from_reader(question: &str, reader: &mut std::io::StdinLock,
 }
 
 /// Helper: Ask user for confirmation (legacy, creates new stdin)
+#[allow(dead_code)]
 fn ask_confirmation(question: &str) -> Result<bool> {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
@@ -619,8 +621,8 @@ async fn main() -> Result<()> {
                                     show_step(1, 3, "Processing booking request...");
                                     
                                     // First tool (usually call_agent_b for pricing)
-                                    let mut step = 1;
-                                    let mut enrollment_complete = false;
+                                    let _step = 1;
+                                    let _enrollment_complete = false;
                                     let mut payment_confirmed = false;
                                     let mut pricing_result = None;
                                     let mut trip_from = "".to_string();

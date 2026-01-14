@@ -9,7 +9,7 @@ use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use crate::proxy_fetch::{ZkfetchToolOptions, ToolOptionsMap};
+use crate::proxy_fetch::{ZkfetchToolOptions, ToolOptionsMap, ProxyFetch, ProxyConfig};
 
 /// Claude API request
 #[derive(Debug, Serialize)]
@@ -183,7 +183,11 @@ pub fn build_tool_options_map() -> ToolOptionsMap {
         "book-flight".to_string(),
         ZkfetchToolOptions {
             public_options: None,
-            private_options: None,
+            // Use private_options to hide sensitive request body from proof
+            // This keeps passenger PII out of the on-chain proof
+            private_options: Some(json!({
+                "hiddenParameters": ["passenger_name", "passenger_email"]
+            })),
             // Select ONLY the fields we want to reveal - everything else is redacted
             redactions: Some(vec![
                 json!({"jsonPath": "$.data.booking_id"}),
@@ -196,7 +200,7 @@ pub fn build_tool_options_map() -> ToolOptionsMap {
 
     // enroll-card: Payment card enrollment - redact card details
     // Reveals ONLY: tokenId
-    // Hides: all card information
+    // Hides: all card information from proof
     let mut enroll_card_paths = std::collections::HashMap::new();
     enroll_card_paths.insert("tokenId".to_string(), "$.data.tokenId".to_string());
     
@@ -204,7 +208,10 @@ pub fn build_tool_options_map() -> ToolOptionsMap {
         "enroll-card".to_string(),
         ZkfetchToolOptions {
             public_options: None,
-            private_options: None,
+            // Use private_options to hide sensitive card data from proof
+            private_options: Some(json!({
+                "hiddenParameters": ["card_number", "cvv", "expiry"]
+            })),
             // Select ONLY the token ID - everything else is redacted
             redactions: Some(vec![
                 json!({"jsonPath": "$.data.tokenId"}),
@@ -215,7 +222,7 @@ pub fn build_tool_options_map() -> ToolOptionsMap {
 
     // initiate-purchase-instruction: Payment initiation - redact transaction details
     // Reveals ONLY: instructionId
-    // Hides: amount, tokenId, and other sensitive transaction details
+    // Hides: amount, tokenId, and other sensitive transaction details from proof
     let mut purchase_paths = std::collections::HashMap::new();
     purchase_paths.insert("instructionId".to_string(), "$.data.instructionId".to_string());
     
@@ -223,7 +230,10 @@ pub fn build_tool_options_map() -> ToolOptionsMap {
         "initiate-purchase-instruction".to_string(),
         ZkfetchToolOptions {
             public_options: None,
-            private_options: None,
+            // Use private_options to hide sensitive transaction data from proof
+            private_options: Some(json!({
+                "hiddenParameters": ["amount", "tokenId"]
+            })),
             // Select ONLY the instruction ID - everything else is redacted
             redactions: Some(vec![
                 json!({"jsonPath": "$.data.instructionId"}),
@@ -233,20 +243,22 @@ pub fn build_tool_options_map() -> ToolOptionsMap {
     );
 
     // retrieve-payment-credentials: Payment credential retrieval - redact all sensitive data
-    // Masks payment credentials in response
+    // Reveals ONLY: credentials
+    // Hides: tokenId, instructionId, and other identifiers from proof
     let mut credentials_paths = std::collections::HashMap::new();
     credentials_paths.insert("credentials".to_string(), "$.data.credentials".to_string());
-    credentials_paths.insert("paymentCredentials".to_string(), "$.data.paymentCredentials".to_string());
     
     map.insert(
         "retrieve-payment-credentials".to_string(),
         ZkfetchToolOptions {
             public_options: None,
-            private_options: None,
+            // Use private_options to hide sensitive identifiers from proof
+            private_options: Some(json!({
+                "hiddenParameters": ["tokenId", "instructionId"]
+            })),
+            // Select ONLY the credentials - everything else is redacted
             redactions: Some(vec![
-                // Only redact response data - request body is not in zkfetch response
                 json!({"jsonPath": "$.data.credentials"}),
-                json!({"jsonPath": "$.data.paymentCredentials"}),
             ]),
             response_redaction_paths: Some(credentials_paths),
         },
@@ -541,110 +553,81 @@ pub async fn call_tool_with_proof(
     tool_name: &str,
     arguments: Value,
 ) -> Result<(String, Option<CryptographicProof>)> {
-    // If zkfetch-wrapper is configured, use it to get cryptographic proof
+    // If zkfetch-wrapper is configured, use ProxyFetch to get cryptographic proof
     if let Some(zkfetch_url) = zkfetch_wrapper_url {
         println!("[TOOL] Calling {} via zkfetch-wrapper (PROXIED)", tool_name);
-        // zkfetch-wrapper expects:
-        // POST /zkfetch with { url, publicOptions, privateOptions, redactions }
+        
+        // Create ProxyFetch with zkfetch config
+        let proxy_config = ProxyConfig {
+            url: zkfetch_url.to_string(),
+            proxy_type: "zkfetch".to_string(),
+            username: None,
+            password: None,
+            tool_options_map: Some(build_tool_options_map()),
+            default_zk_options: None,
+            debug: std::env::var("DEBUG_PROXY_FETCH").is_ok(),
+        };
+        
+        let proxy_fetch = ProxyFetch::new(proxy_config)?;
         let target_url = format!("{}/tools/{}", server_url, tool_name);
         
-        // Get tool options for this tool to embed redaction rules in zkfetch payload
-        let tool_options_map = build_tool_options_map();
-        let tool_opts = tool_options_map.get(tool_name);
-        
-        // Build zkfetch payload with embedded redaction rules
-        let mut zkfetch_payload = json!({
-            "url": target_url,
-            "publicOptions": {
-                "method": "POST",
-                "headers": {
-                    "Content-Type": "application/json"
-                },
-                "body": arguments.to_string()
-            }
-        });
-        
-        // Add redaction rules if this tool has sensitive fields
-        if let Some(opts) = tool_opts {
-            if let Some(redactions) = &opts.redactions {
-                zkfetch_payload["redactions"] = json!(redactions);
-                println!("[ZKFETCH] Applied {} redaction rules for {}", redactions.len(), tool_name);
-            }
+        // Add tool name to arguments so it can be extracted in proxy_fetch
+        let mut arguments_with_name = arguments.clone();
+        if let Some(obj) = arguments_with_name.as_object_mut() {
+            obj.insert("name".to_string(), json!(tool_name));
         }
-
-        println!("[ZKFETCH] Calling Agent B through zkfetch-wrapper: {}", tool_name);
         
-        match client
-            .post(&format!("{}/zkfetch", zkfetch_url))
-            .json(&zkfetch_payload)
-            .send()
-            .await
-        {
-            Ok(response) => {
-                match response.json::<Value>().await {
-                    Ok(zkfetch_response) => {
-                        println!("[ZKFETCH] Received proof for tool: {}", tool_name);
-                        
-                        // Extract the tool response
-                        let tool_result = zkfetch_response.get("data").cloned().unwrap_or(json!({}));
-                        
-                        // Extract proof information
-                        let proof = zkfetch_response.get("proof").cloned();
-                        let verified = zkfetch_response.get("verified").and_then(|v| v.as_bool()).unwrap_or(false);
-                        let onchain_compatible = zkfetch_response.get("metadata")
-                            .and_then(|m| m.get("onchain_compatible"))
-                            .and_then(|o| o.as_bool())
-                            .unwrap_or(false);
-
-                        
-                        // Create cryptographic proof record
-                        let crypto_proof = if let Some(proof_data) = proof {
-                            // Note: Redactions are applied server-side by zkfetch-wrapper.
-                            // The proof returned is already on-chain verifiable with redactions applied.
-                            // We don't apply redactions locally - they happen at the zkfetch payload level.
-                            
-                            Some(CryptographicProof {
-                                tool_name: tool_name.to_string(),
-                                timestamp: std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_secs(),
-                                request: arguments,
-                                response: tool_result.clone(),
-                                proof: proof_data,
-                                proof_id: zkfetch_response.get("metadata")
-                                    .and_then(|m| m.get("proof_id"))
-                                    .and_then(|p| p.as_str())
-                                    .map(|s| s.to_string()),
-                                verified,
-                                onchain_compatible,
-                                display_response: Some(tool_result.clone()),
-                                redaction_metadata: None, // zkfetch-wrapper handles this server-side
-                            })
-                        } else {
-                            None
-                        };
-
-                        
-                        // Extract data and return
-                        if let Some(data) = tool_result.get("data") {
-                            println!("[PROOF] ✓ Proof collected for {} - Verified: {}, On-chain: {}", 
-                                     tool_name, verified, onchain_compatible);
-                            return Ok((data.to_string(), crypto_proof));
-                        } else {
-                            return Ok((tool_result.to_string(), crypto_proof));
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("[ZKFETCH] Failed to parse zkfetch response: {}", e);
-                        // Fall back to direct call
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("[ZKFETCH] Failed to call zkfetch-wrapper: {}", e);
-                // Fall back to direct call
-            }
+        // Use ProxyFetch which handles paramValues extraction in proxy_fetch.rs
+        let response = proxy_fetch.post(&target_url, Some(arguments_with_name)).await?;
+        
+        // Extract proof from response
+        let proof = response.get("proof").cloned();
+        let verified = response.get("verified").and_then(|v| v.as_bool()).unwrap_or(false);
+        let onchain_compatible = response.get("metadata")
+            .and_then(|m| m.get("onchain_compatible"))
+            .and_then(|o| o.as_bool())
+            .unwrap_or(false);
+        
+        println!("[ZKFETCH] Received proof for tool: {}", tool_name);
+        
+        // Extract the tool response
+        let tool_result = response.get("data").cloned().unwrap_or(json!({}));
+        
+        // Create cryptographic proof record
+        let crypto_proof = if let Some(proof_data) = proof {
+            // Note: Redactions are applied server-side by zkfetch-wrapper.
+            // The proof returned is already on-chain verifiable with redactions applied.
+            // We don't apply redactions locally - they happen at the zkfetch payload level.
+            
+            Some(CryptographicProof {
+                tool_name: tool_name.to_string(),
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+                request: arguments.clone(),
+                response: tool_result.clone(),
+                proof: proof_data,
+                proof_id: response.get("metadata")
+                    .and_then(|m| m.get("proof_id"))
+                    .and_then(|p| p.as_str())
+                    .map(|s| s.to_string()),
+                verified,
+                onchain_compatible,
+                display_response: Some(tool_result.clone()),
+                redaction_metadata: None, // zkfetch-wrapper handles this server-side
+            })
+        } else {
+            None
+        };
+        
+        // Extract data and return
+        if let Some(data) = tool_result.get("data") {
+            println!("[PROOF] ✓ Proof collected for {} - Verified: {}, On-chain: {}", 
+                     tool_name, verified, onchain_compatible);
+            return Ok((data.to_string(), crypto_proof));
+        } else {
+            return Ok((tool_result.to_string(), crypto_proof));
         }
     }
     
@@ -863,8 +846,6 @@ pub async fn complete_booking_with_payment(
         None
     };
 
-    let zkfetch_wrapper_url = config.zkfetch_wrapper_url.as_deref();
-    
     let zkfetch_wrapper_url = config.zkfetch_wrapper_url.as_deref();
 
     let session_id = session_id.to_string();
@@ -1635,18 +1616,20 @@ mod tests {
     fn test_build_tool_options_map_retrieve_credentials_redactions() {
         let tool_map = build_tool_options_map();
         
-        // retrieve-payment-credentials should redact all sensitive data
+        // retrieve-payment-credentials should reveal only credentials
         let retrieve_opts = tool_map.get("retrieve-payment-credentials").unwrap();
         assert!(retrieve_opts.redactions.is_some());
         
         let redactions = retrieve_opts.redactions.as_ref().unwrap();
-        assert!(redactions.len() >= 2);
+        assert!(!redactions.is_empty());
         
-        // Verify response redaction paths
+        // Verify response redaction paths (fields to reveal)
         assert!(retrieve_opts.response_redaction_paths.is_some());
         let paths = retrieve_opts.response_redaction_paths.as_ref().unwrap();
         assert!(paths.contains_key("credentials"));
-        assert!(paths.contains_key("paymentCredentials"));
+        
+        // Verify private options hide sensitive request data
+        assert!(retrieve_opts.private_options.is_some());
     }
 
     #[test]
