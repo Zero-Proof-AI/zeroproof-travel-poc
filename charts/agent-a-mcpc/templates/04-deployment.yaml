@@ -56,6 +56,11 @@ spec:
                 configMapKeyRef:
                   name: agent-a-mcpc-config
                   key: AGENT_A_SERVER_URL
+            - name: ZKFETCH_WRAPPER_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: agent-a-mcpc-config
+                  key: ZKFETCH_WRAPPER_URL
             - name: AGENT_B_MCP_URL
               valueFrom:
                 configMapKeyRef:

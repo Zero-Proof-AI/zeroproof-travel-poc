@@ -5,7 +5,7 @@ metadata:
   labels:
     app: ai-agent
 data:
-  NODE_ENV: development
+  ENVIRONMENT: development
   PORT: "3001"
   REACT_APP_BACKEND_API: https://dev.agenta.zeroproofai.com/chat
   nginx.conf: |
