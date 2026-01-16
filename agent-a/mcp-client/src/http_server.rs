@@ -15,7 +15,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
 
-use mcp_client::{AgentConfig, BookingState, ClaudeMessage, process_user_query, ProofDatabase, StoredProof};
+use mcp_client::{AgentConfig, BookingState, ClaudeMessage, process_user_query};
 
 /// Session data storing conversation history and booking state
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,8 +63,8 @@ struct ChatResponse {
     session_id: Option<String>,
 }
 
-/// Proof submission request
-#[derive(Debug, Deserialize)]
+/// Proof submission request - sent to attestation service
+#[derive(Debug, Serialize, Deserialize)]
 struct ProofSubmissionRequest {
     session_id: String,
     tool_name: String,
@@ -85,8 +85,8 @@ struct ProofSubmissionRequest {
     workflow_stage: Option<String>,
 }
 
-/// Proof submission response
-#[derive(Debug, Serialize)]
+/// Proof submission response - received from attestation service
+#[derive(Debug, Serialize, Deserialize)]
 struct ProofSubmissionResponse {
     success: bool,
     proof_id: String,
@@ -94,83 +94,55 @@ struct ProofSubmissionResponse {
     error: Option<String>,
 }
 
-/// Proofs retrieval response - with full on-chain verification data
-#[derive(Debug, Serialize)]
+/// Proofs retrieval response - passed through from attester service
+#[derive(Debug, Serialize, Deserialize)]
 struct ProofsResponse {
     success: bool,
     session_id: String,
     count: usize,
-    proofs: Vec<StoredProof>,
+    proofs: Vec<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     verification_metadata: Option<VerificationMetadata>,
 }
 
 /// Metadata to help agents verify proofs on-chain
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct VerificationMetadata {
-    proof_protocol: String,                    // "ZK-TLS" or "Reclaim Protocol"
-    verification_method: String,               // How to verify (e.g., "Reclaim Smart Contract")
-    contract_chain: Option<String>,            // Network where contract is deployed
-    contract_address: Option<String>,          // Smart contract address for verification
-    documentation_url: Option<String>,         // Link to verification documentation
+    proof_protocol: Option<String>,
+    verification_method: Option<String>,
+    contract_chain: Option<String>,
+    contract_address: Option<String>,
+    documentation_url: Option<String>,
 }
 
 /// Single proof response - optimized for on-chain verification
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct SingleProofResponse {
     success: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    proof: Option<SingleProofData>,
+    data: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
 
-/// Complete proof data for on-chain submission
-#[derive(Debug, Serialize, Clone)]
-struct SingleProofData {
-    // Core proof data
-    proof_id: String,
-    session_id: String,
-    tool_name: String,
-    timestamp: u64,
-    
-    // Original request/response
-    request: serde_json::Value,
-    response: serde_json::Value,
-    
-    // ZK-TLS proof (most important for on-chain verification)
-    proof: serde_json::Value,
-    
-    // Verification status
-    verified: bool,
-    onchain_compatible: bool,
-    
-    // Workflow context
-    submitted_by: Option<String>,
-    sequence: Option<u32>,
-    related_proof_id: Option<String>,
-    workflow_stage: Option<String>,
-    
-    // Metadata for verification
-    verification_info: VerificationInfo,
-}
-
-/// Verification information for any agent to verify proof on-chain
-#[derive(Debug, Serialize, Clone)]
-struct VerificationInfo {
-    protocol: String,                    // "ZK-TLS"
-    issuer: String,                      // "Reclaim Protocol"
-    timestamp_verified: bool,            // Was timestamp verified
-    signature_algorithm: String,         // Algorithm used for signing
-    can_verify_onchain: bool,           // Is this proof ready for blockchain
-    reclaim_documentation: String,       // Link to how to verify with Reclaim
-}
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "healthy".to_string(),
         version: "0.1.0".to_string(),
     })
 }
+
+/// Helper to get attestation service URL from environment or default
+fn get_attestation_service_url() -> String {
+    std::env::var("ATTESTATION_SERVICE_URL")
+        .unwrap_or_else(|_| "http://localhost:8000".to_string())
+}
+
+/// Helper to get attestation service URL and HTTP client together
+fn get_attestation_client() -> (String, reqwest::Client) {
+    (get_attestation_service_url(), reqwest::Client::new())
+}
+
 /// Main chat endpoint with session-based conversation management
 async fn chat(
     axum::extract::Extension(sessions): axum::extract::Extension<SessionManager>,
@@ -253,224 +225,210 @@ async fn chat(
     }
 }
 
-/// Submit a cryptographic proof
+/// Submit a cryptographic proof - proxy to zk-attestation-service
 async fn submit_proof(
-    axum::extract::Extension(proof_db): axum::extract::Extension<ProofDatabase>,
     Json(payload): Json<ProofSubmissionRequest>,
 ) -> impl IntoResponse {
-    println!("[PROOF] Received proof submission: tool={}, session={}, stage={:?}", 
-             payload.tool_name, payload.session_id, payload.workflow_stage);
+    println!("[AGENT-A PROOF SUBMIT] 📤 Received proof submission");
+    println!("  tool_name: {}", payload.tool_name);
+    println!("  session_id: {}", payload.session_id);
+    println!("  verified: {}", payload.verified);
+    println!("  onchain_compatible: {}", payload.onchain_compatible);
+    println!("  workflow_stage: {:?}", payload.workflow_stage);
     
-    let proof_id = payload.proof_id.clone().unwrap_or_else(|| {
-        format!("proof_{}", uuid::Uuid::new_v4())
-    });
+    let (attestation_url, client) = get_attestation_client();
     
-    let stored_proof = StoredProof {
-        proof_id: proof_id.clone(),
-        session_id: payload.session_id,
-        tool_name: payload.tool_name,
-        timestamp: payload.timestamp,
-        request: payload.request,
-        response: payload.response,
-        proof: payload.proof,
-        verified: payload.verified,
-        onchain_compatible: payload.onchain_compatible,
-        submitted_by: payload.submitted_by,
-        sequence: payload.sequence,
-        related_proof_id: payload.related_proof_id,
-        workflow_stage: payload.workflow_stage,
-        display_response: None,  // Can be populated separately if needed
-        redaction_metadata: None,  // Can be populated separately if needed
-    };
+    println!("[AGENT-A PROOF SUBMIT] Calling attestation service at: {}/proofs/submit", attestation_url);
     
-    match proof_db.store_proof(stored_proof).await {
-        Ok(stored_id) => {
-            println!("[PROOF] Proof stored: {}", stored_id);
-            (
-                StatusCode::OK,
-                Json(ProofSubmissionResponse {
-                    success: true,
-                    proof_id: stored_id,
-                    error: None,
-                }),
-            )
+    let submit_url = format!("{}/proofs/submit", attestation_url);
+    
+    match client.post(&submit_url).json(&payload).send().await {
+        Ok(response) => {
+            println!("[AGENT-A PROOF SUBMIT] ✓ Got response from attestation service (status: {})", response.status());
+            
+            match response.json::<ProofSubmissionResponse>().await {
+                Ok(result) => {
+                    println!("[AGENT-A PROOF SUBMIT] ✅ Proof submitted successfully: proof_id={:?}", result.proof_id);
+                    (StatusCode::OK, Json(result))
+                }
+                Err(e) => {
+                    println!("[AGENT-A PROOF SUBMIT] ❌ Failed to parse attestation response: {}", e);
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        Json(ProofSubmissionResponse {
+                            success: false,
+                            proof_id: String::new(),
+                            error: Some(format!("Failed to parse response: {}", e)),
+                        }),
+                    )
+                }
+            }
         }
         Err(e) => {
-            println!("[ERROR] Failed to store proof: {}", e);
+            println!("[AGENT-A PROOF SUBMIT] ❌ Failed to call attestation service at {}: {}", submit_url, e);
             (
-                StatusCode::INTERNAL_SERVER_ERROR,
+                StatusCode::BAD_GATEWAY,
                 Json(ProofSubmissionResponse {
                     success: false,
                     proof_id: String::new(),
-                    error: Some(e),
+                    error: Some(format!("Attestation service error: {}", e)),
                 }),
             )
         }
     }
 }
 
-/// Retrieve proofs for a session
+/// Retrieve proofs for a session - proxy to zk-attestation-service
 async fn get_proofs(
-    axum::extract::Extension(proof_db): axum::extract::Extension<ProofDatabase>,
     Path(session_id): Path<String>,
 ) -> impl IntoResponse {
-    println!("[PROOF] Retrieving full proofs for session: {}", session_id);
+    println!("[AGENT-A PROOFS LIST] 📋 Retrieving proofs for session: {}", session_id);
     
-    match proof_db.get_proofs(&session_id).await {
-        Ok(proofs) => {
-            let count = proofs.len();
+    let (attestation_url, client) = get_attestation_client();
+    let fetch_url = format!("{}/proofs/session/{}", attestation_url, session_id);
+    
+    println!("[AGENT-A PROOFS LIST] Calling attestation service: {}", fetch_url);
+    
+    match client.get(&fetch_url).send().await {
+        Ok(response) => {
+            println!("[AGENT-A PROOFS LIST] ✓ Got response from attestation service (status: {})", response.status());
             
-            // Log detailed proof data for debugging
-            for proof in &proofs {
-                println!("[PROOF] Proof details - ID: {}, Tool: {}, Verified: {}, On-chain: {}, Stage: {:?}", 
-                         proof.proof_id, 
-                         proof.tool_name, 
-                         proof.verified,
-                         proof.onchain_compatible,
-                         proof.workflow_stage);
-                
-                // Log raw proof structure for verification
-                // if let Ok(proof_str) = serde_json::to_string_pretty(&proof.proof) {
-                //     println!("[PROOF] Raw ZK-TLS proof structure:\n{}", proof_str);
-                // }
+            match response.json::<serde_json::Value>().await {
+                Ok(result) => {
+                    let count = result.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+                    println!("[AGENT-A PROOFS LIST] ✅ Retrieved {} proofs from attestation service", count);
+                    (StatusCode::OK, Json(result))
+                }
+                Err(e) => {
+                    println!("[AGENT-A PROOFS LIST] ❌ Failed to parse attestation response: {}", e);
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        Json(serde_json::json!({
+                            "success": false,
+                            "error": format!("Failed to parse response: {}", e)
+                        })),
+                    )
+                }
             }
-            
-            // Create verification metadata for cross-agent verification
-            let verification_metadata = VerificationMetadata {
-                proof_protocol: "ZK-TLS (Reclaim Protocol)".to_string(),
-                verification_method: "Reclaim Smart Contract Verification".to_string(),
-                contract_chain: Some("Ethereum Sepolia".to_string()),
-                contract_address: Some("0x0000000000000000000000000000000000000000".to_string()), // Placeholder
-                documentation_url: Some("https://docs.reclaim.ai/verify".to_string()),
-            };
-            
-            (
-                StatusCode::OK,
-                Json(ProofsResponse {
-                    success: true,
-                    session_id,
-                    count,
-                    proofs,
-                    verification_metadata: Some(verification_metadata),
-                }),
-            )
         }
         Err(e) => {
-            println!("[ERROR] Failed to retrieve proofs: {}", e);
+            println!("[AGENT-A PROOFS LIST] ❌ Failed to call attestation service: {}", e);
             (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ProofsResponse {
-                    success: false,
-                    session_id,
-                    count: 0,
-                    proofs: Vec::new(),
-                    verification_metadata: None,
-                }),
-            )
-        }
-    }
-}
-
-/// Get proof count for a session
-async fn get_proof_count(
-    axum::extract::Extension(proof_db): axum::extract::Extension<ProofDatabase>,
-    Path(session_id): Path<String>,
-) -> impl IntoResponse {
-    match proof_db.get_proof_count(&session_id).await {
-        Ok(count) => {
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "success": true,
-                    "session_id": session_id,
-                    "count": count
-                })),
-            )
-        }
-        Err(e) => {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
+                StatusCode::BAD_GATEWAY,
                 Json(serde_json::json!({
                     "success": false,
-                    "error": e
+                    "error": format!("Attestation service error: {}", e)
                 })),
             )
         }
     }
 }
 
-/// Retrieve a single proof by ID with full on-chain verification metadata
-async fn get_proof_by_id(
-    axum::extract::Extension(proof_db): axum::extract::Extension<ProofDatabase>,
-    Path(proof_id): Path<String>,
+/// Get proof count for a session - proxy to zk-attestation-service
+async fn get_proof_count(
+    Path(session_id): Path<String>,
 ) -> impl IntoResponse {
-    println!("[PROOF] Retrieving proof for on-chain verification: {}", proof_id);
+    println!("[AGENT-A PROOF COUNT] 📊 Getting proof count for session: {}", session_id);
     
-    match proof_db.get_proof(&proof_id).await {
-        Ok(Some(stored_proof)) => {
-            println!("[PROOF] Found proof - Tool: {}, Verified: {}, On-chain: {}", 
-                     stored_proof.tool_name, 
-                     stored_proof.verified,
-                     stored_proof.onchain_compatible);
+    let (attestation_url, client) = get_attestation_client();
+    let fetch_url = format!("{}/proofs/count/{}", attestation_url, session_id);
+    
+    println!("[AGENT-A PROOF COUNT] Calling attestation service: {}", fetch_url);
+    
+    match client.get(&fetch_url).send().await {
+        Ok(response) => {
+            println!("[AGENT-A PROOF COUNT] ✓ Got response from attestation service (status: {})", response.status());
             
-            let single_proof = SingleProofData {
-                proof_id: stored_proof.proof_id.clone(),
-                session_id: stored_proof.session_id.clone(),
-                tool_name: stored_proof.tool_name.clone(),
-                timestamp: stored_proof.timestamp,
-                request: stored_proof.request.clone(),
-                response: stored_proof.response.clone(),
-                proof: stored_proof.proof.clone(),
-                verified: stored_proof.verified,
-                onchain_compatible: stored_proof.onchain_compatible,
-                submitted_by: stored_proof.submitted_by.clone(),
-                sequence: stored_proof.sequence,
-                related_proof_id: stored_proof.related_proof_id.clone(),
-                workflow_stage: stored_proof.workflow_stage.clone(),
-                verification_info: VerificationInfo {
-                    protocol: "ZK-TLS".to_string(),
-                    issuer: "Reclaim Protocol".to_string(),
-                    timestamp_verified: stored_proof.verified,
-                    signature_algorithm: "SHA256withECDSA".to_string(),
-                    can_verify_onchain: stored_proof.onchain_compatible,
-                    reclaim_documentation: "https://docs.reclaim.ai/verify".to_string(),
-                },
-            };
-            
-            (
-                StatusCode::OK,
-                Json(SingleProofResponse {
-                    success: true,
-                    proof: Some(single_proof),
-                    error: None,
-                }),
-            )
-        }
-        Ok(None) => {
-            println!("[WARNING] Proof not found: {}", proof_id);
-            (
-                StatusCode::NOT_FOUND,
-                Json(SingleProofResponse {
-                    success: false,
-                    proof: None,
-                    error: Some(format!("Proof not found: {}", proof_id)),
-                }),
-            )
+            match response.json::<serde_json::Value>().await {
+                Ok(result) => {
+                    let count = result.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+                    println!("[AGENT-A PROOF COUNT] ✅ Session has {} proofs", count);
+                    (StatusCode::OK, Json(result))
+                }
+                Err(e) => {
+                    println!("[AGENT-A PROOF COUNT] ❌ Failed to parse attestation response: {}", e);
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        Json(serde_json::json!({
+                            "success": false,
+                            "error": format!("Failed to parse response: {}", e)
+                        })),
+                    )
+                }
+            }
         }
         Err(e) => {
-            println!("[ERROR] Failed to retrieve proof: {}", e);
+            println!("[AGENT-A PROOF COUNT] ❌ Failed to call attestation service: {}", e);
             (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(SingleProofResponse {
-                    success: false,
-                    proof: None,
-                    error: Some(e),
-                }),
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Attestation service error: {}", e)
+                })),
             )
         }
     }
 }
 
+/// Retrieve a single proof by ID - proxy to zk-attestation-service
+async fn get_proof_by_id(
+    Path(proof_id): Path<String>,
+) -> impl IntoResponse {
+    println!("[AGENT-A PROOF GET] 🔍 Retrieving proof for verification: {}", proof_id);
+    
+    let (attestation_url, client) = get_attestation_client();
+    let fetch_url = format!("{}/proofs/{}", attestation_url, proof_id);
+    
+    println!("[AGENT-A PROOF GET] Calling attestation service: {}", fetch_url);
+    
+    match client.get(&fetch_url).send().await {
+        Ok(response) => {
+            println!("[AGENT-A PROOF GET] ✓ Got response from attestation service (status: {})", response.status());
+            
+            match response.json::<serde_json::Value>().await {
+                Ok(result) => {
+                    let success = result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+                    if success {
+                        println!("[AGENT-A PROOF GET] ✅ Retrieved proof successfully");
+                        // Flatten response: extract 'data' field and make it top-level 'proof'
+                        let proof = result.get("data").and_then(|d| d.get("proof")).cloned().unwrap_or_default();
+                        let verification_info = result.get("data").and_then(|d| d.get("verification_info")).cloned();
+                        
+                        let flattened_response = serde_json::json!({
+                            "success": true,
+                            "proof": proof,
+                            "verification_info": verification_info
+                        });
+                        (StatusCode::OK, Json(flattened_response))
+                    } else {
+                        println!("[AGENT-A PROOF GET] ⚠️ Proof not found or error in response");
+                        (StatusCode::OK, Json(result))
+                    }
+                }
+                Err(e) => {
+                    println!("[AGENT-A PROOF GET] ❌ Failed to parse attestation response: {}", e);
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        Json(serde_json::json!({
+                            "success": false,
+                            "error": format!("Failed to parse response: {}", e)
+                        })),
+                    )
+                }
+            }
+        }
+        Err(e) => {
+            println!("[AGENT-A PROOF GET] ❌ Failed to call attestation service: {}", e);
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Attestation service error: {}", e)
+                })),
+            )
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() {
@@ -505,26 +463,28 @@ async fn main() {
     } else {
         println!("  zkfetch-wrapper URL: NOT CONFIGURED - proofs will NOT be collected");
     }
+    
+    if let Ok(attestation_url) = std::env::var("ATTESTATION_SERVICE_URL") {
+        println!("  Attestation Service URL: {}", attestation_url);
+    } else {
+        println!("  Attestation Service URL: http://localhost:8000 (default)");
+    }
 
     // Create session manager
     let sessions: SessionManager = Arc::new(Mutex::new(HashMap::new()));
     println!("[SESSION] Session manager initialized");
+    println!("[PROOF] All proofs proxied to zk-attestation-service");
 
-    // Create proof database
-    let proof_db = ProofDatabase::new();
-    println!("[PROOF] Proof database initialized");
-
-    // Build router with session manager and proof database extensions
+    // Build router with session manager extension
     let app = Router::new()
         .route("/health", get(health))
         .route("/chat", post(chat))
         .route("/proofs", post(submit_proof))
-        .route("/proofs/:session_id", get(get_proofs))
-        .route("/proofs/:session_id/count", get(get_proof_count))
-        .route("/proofs/verify/:proof_id", get(get_proof_by_id))
+        .route("/proofs/verify/:proof_id", get(get_proof_by_id))  // Most specific first
+        .route("/proofs/:session_id/count", get(get_proof_count)) // Second most specific
+        .route("/proofs/:session_id", get(get_proofs))             // Least specific (catch-all)
         .layer(CorsLayer::permissive())
-        .layer(axum::extract::Extension(sessions))
-        .layer(axum::extract::Extension(proof_db));
+        .layer(axum::extract::Extension(sessions));
 
     // Create listener
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port))

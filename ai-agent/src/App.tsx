@@ -149,7 +149,7 @@ const ChatInterface: React.FC = () => {
   React.useEffect(() => {
     if (!showProofs) return;
 
-    const interval = setInterval(fetchProofsAutomatically, 2000);
+    const interval = setInterval(fetchProofsAutomatically, 5000);
     return () => clearInterval(interval);
   }, [showProofs, fetchProofsAutomatically]);
 

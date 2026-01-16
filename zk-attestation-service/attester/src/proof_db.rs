@@ -5,8 +5,25 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
-use crate::orchestration::RedactionMetadata;
+use std::sync::RwLock;
+
+/// Redaction metadata (same as agent-a)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RedactionMetadata {
+    pub redacted_field_count: usize,
+    pub redacted_paths: Vec<String>,
+    pub was_redacted: bool,
+}
+
+impl Default for RedactionMetadata {
+    fn default() -> Self {
+        Self {
+            redacted_field_count: 0,
+            redacted_paths: Vec::new(),
+            was_redacted: false,
+        }
+    }
+}
 
 /// Stored proof record
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,7 +54,7 @@ pub struct StoredProof {
     pub redaction_metadata: Option<RedactionMetadata>,
 }
 
-/// In-memory proof database
+/// In-memory proof database (sync version for Axum handlers)
 pub struct ProofDatabase {
     proofs: Arc<RwLock<HashMap<String, Vec<StoredProof>>>>, // session_id -> proofs
 }
@@ -50,8 +67,8 @@ impl ProofDatabase {
     }
 
     /// Store a proof in the database
-    pub async fn store_proof(&self, proof: StoredProof) -> Result<String, String> {
-        let mut db = self.proofs.write().await;
+    pub fn store_proof(&self, proof: StoredProof) -> Result<String, String> {
+        let mut db = self.proofs.write().map_err(|e| format!("Lock error: {}", e))?;
         
         let proof_id = proof.proof_id.clone();
         let session_id = proof.session_id.clone();
@@ -64,8 +81,8 @@ impl ProofDatabase {
     }
 
     /// Retrieve all proofs for a session, sorted by timestamp
-    pub async fn get_proofs(&self, session_id: &str) -> Result<Vec<StoredProof>, String> {
-        let db = self.proofs.read().await;
+    pub fn get_proofs(&self, session_id: &str) -> Result<Vec<StoredProof>, String> {
+        let db = self.proofs.read().map_err(|e| format!("Lock error: {}", e))?;
         
         let mut proofs = db
             .get(session_id)
@@ -79,8 +96,8 @@ impl ProofDatabase {
     }
 
     /// Retrieve a specific proof by ID
-    pub async fn get_proof(&self, proof_id: &str) -> Result<Option<StoredProof>, String> {
-        let db = self.proofs.read().await;
+    pub fn get_proof(&self, proof_id: &str) -> Result<Option<StoredProof>, String> {
+        let db = self.proofs.read().map_err(|e| format!("Lock error: {}", e))?;
         
         // Search through all sessions to find the proof
         for proofs in db.values() {
@@ -95,16 +112,89 @@ impl ProofDatabase {
     }
 
     /// Get proof count for a session
-    pub async fn get_proof_count(&self, session_id: &str) -> Result<usize, String> {
-        let db = self.proofs.read().await;
+    pub fn get_proof_count(&self, session_id: &str) -> Result<usize, String> {
+        let db = self.proofs.read().map_err(|e| format!("Lock error: {}", e))?;
         Ok(db.get(session_id).map(|p| p.len()).unwrap_or(0))
     }
 
     /// Clear proofs for a session
-    pub async fn clear_proofs(&self, session_id: &str) -> Result<usize, String> {
-        let mut db = self.proofs.write().await;
+    pub fn clear_proofs(&self, session_id: &str) -> Result<usize, String> {
+        let mut db = self.proofs.write().map_err(|e| format!("Lock error: {}", e))?;
         Ok(db.remove(session_id).map(|p| p.len()).unwrap_or(0))
     }
+}
+
+// HTTP Request/Response types
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ProofSubmissionRequest {
+    pub session_id: String,
+    pub tool_name: String,
+    pub timestamp: u64,
+    pub request: serde_json::Value,
+    pub response: serde_json::Value,
+    pub proof: serde_json::Value,
+    #[serde(default)]
+    pub verified: bool,
+    #[serde(default)]
+    pub onchain_compatible: bool,
+    pub submitted_by: Option<String>,
+    pub sequence: Option<u32>,
+    pub related_proof_id: Option<String>,
+    pub workflow_stage: Option<String>,
+    pub display_response: Option<serde_json::Value>,
+    pub redaction_metadata: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProofSubmissionResponse {
+    pub success: bool,
+    pub proof_id: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SingleProofResponse {
+    pub success: bool,
+    pub data: Option<SingleProofData>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SingleProofData {
+    pub proof: StoredProof,
+    pub verification_info: VerificationInfo,
+}
+
+#[derive(Debug, Serialize)]
+pub struct VerificationInfo {
+    pub protocol: String,
+    pub issuer: String,
+    pub timestamp_verified: bool,
+    pub signature_algorithm: String,
+    pub can_verify_onchain: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProofsResponse {
+    pub success: bool,
+    pub session_id: String,
+    pub count: usize,
+    pub proofs: Vec<StoredProof>,
+    pub verification_metadata: VerificationMetadata,
+}
+
+#[derive(Debug, Serialize)]
+pub struct VerificationMetadata {
+    pub protocol: String,
+    pub issuer: String,
+    pub verification_service: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProofCountResponse {
+    pub success: bool,
+    pub session_id: String,
+    pub count: usize,
 }
 
 impl Clone for ProofDatabase {
@@ -115,12 +205,18 @@ impl Clone for ProofDatabase {
     }
 }
 
+impl Default for ProofDatabase {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn test_store_and_retrieve_proof() {
+    #[test]
+    fn test_store_and_retrieve_proof() {
         let db = ProofDatabase::new();
         
         let proof = StoredProof {
@@ -141,9 +237,9 @@ mod tests {
             redaction_metadata: None,
         };
         
-        db.store_proof(proof.clone()).await.unwrap();
+        db.store_proof(proof.clone()).unwrap();
         
-        let proofs = db.get_proofs("session_1").await.unwrap();
+        let proofs = db.get_proofs("session_1").unwrap();
         assert_eq!(proofs.len(), 1);
         assert_eq!(proofs[0].proof_id, "proof_1");
     }

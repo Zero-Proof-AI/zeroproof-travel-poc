@@ -9,7 +9,15 @@ use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use tokio::sync::Mutex;
 use crate::proxy_fetch::{ZkfetchToolOptions, ToolOptionsMap, ProxyFetch, ProxyConfig};
+
+// Thread-safe cache for tool definitions
+// Tools are fetched once at first request and then reused for all subsequent requests
+// This prevents the repeated GET /tools calls to payment agent on every chat message
+lazy_static::lazy_static! {
+    static ref TOOLS_CACHE: Mutex<Option<Value>> = Mutex::new(None);
+}
 
 /// Claude API request
 #[derive(Debug, Serialize)]
@@ -96,7 +104,7 @@ pub struct BookingState {
     pub instruction_id: Option<String>,
     pub vip: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub cryptographic_traces: Vec<CryptographicProof>, // Collected proofs from agent-b calls
+    pub cryptographic_traces: Vec<CryptographicProof>, // Collected proofs from agent-b calls - single source of truth for all proofs
 }
 
 impl Default for BookingState {
@@ -289,13 +297,24 @@ pub async fn fetch_tool_definitions(
     }
 }
 
-/// Fetch and merge tool definitions from all servers
+/// Fetch and merge tool definitions from all servers with caching
+/// Tools are fetched only once on first request, then cached and reused
+/// This prevents repeated GET /tools calls to payment agent on every chat message
 pub async fn fetch_all_tools(
     client: &reqwest::Client,
     agent_a_url: &str,
     agent_b_url: &str,
     payment_agent_url: Option<&str>,
 ) -> Result<Value> {
+    // Check if tools are already cached
+    let mut cache = TOOLS_CACHE.lock().await;
+    
+    if let Some(cached_tools) = cache.as_ref() {
+        println!("[TOOLS CACHE] ✓ Using cached tool definitions (avoids repeated /tools calls)");
+        return Ok(cached_tools.clone());
+    }
+    
+    println!("[TOOLS CACHE] Cache miss - fetching tool definitions from all servers...");
     let mut all_tools: Vec<Value> = Vec::new();
     
     // Skip Agent A tools if running in HTTP mode (localhost:3001) to avoid circular fetching
@@ -365,10 +384,11 @@ pub async fn fetch_all_tools(
                 
                 if let Some(tools) = payment_tools {
                     all_tools.extend(tools.clone());
+                    println!("[TOOLS CACHE] ✓ Fetched payment agent tools");
                 }
             }
-            Err(_) => {
-                eprintln!("Warning: Could not fetch Payment Agent tools");
+            Err(e) => {
+                eprintln!("Warning: Could not fetch Payment Agent tools: {}", e);
             }
         }
     }
@@ -404,7 +424,13 @@ pub async fn fetch_all_tools(
         ];
     }
     
-    Ok(json!({ "tools": all_tools }))
+    let result = json!({ "tools": all_tools });
+    
+    // Store in cache for future requests
+    *cache = Some(result.clone());
+    println!("[TOOLS CACHE] ✓ Cached {} tools for future requests", all_tools.len());
+    
+    Ok(result)
 }
 
 /// Call Claude API to get tool recommendations
@@ -523,25 +549,93 @@ IMPORTANT:
 pub fn parse_tool_calls(claude_response: &str) -> Result<Vec<(String, Value)>> {
     let json_start = claude_response.find('{');
     let json_end = claude_response.rfind('}');
+    
+    println!("[PARSER] Looking for JSON in response (length: {})", claude_response.len());
+    println!("[PARSER] First {{ at: {:?}, Last }} at: {:?}", json_start, json_end);
 
     if let (Some(start), Some(end)) = (json_start, json_end) {
         let json_str = &claude_response[start..=end];
-        let parsed: Value = serde_json::from_str(json_str)?;
-
-        let mut tools = Vec::new();
-        if let Some(tool_calls) = parsed.get("tool_calls").and_then(|t| t.as_array()) {
-            for call in tool_calls {
-                if let (Some(name), Some(args)) = (
-                    call.get("name").and_then(|n| n.as_str()),
-                    call.get("arguments"),
-                ) {
-                    tools.push((name.to_string(), args.clone()));
+        println!("[PARSER] Extracted JSON (length: {}): {}", json_str.len(), 
+                 &json_str[..json_str.len().min(200)]);
+        
+        match serde_json::from_str::<Value>(json_str) {
+            Ok(parsed) => {
+                println!("[PARSER] ✓ JSON parsed successfully");
+                println!("[PARSER] Root keys: {:?}", parsed.as_object().map(|o| o.keys().collect::<Vec<_>>()));
+                
+                let mut tools = Vec::new();
+                if let Some(tool_calls) = parsed.get("tool_calls").and_then(|t| t.as_array()) {
+                    println!("[PARSER] ✓ Found tool_calls array with {} items", tool_calls.len());
+                    for (i, call) in tool_calls.iter().enumerate() {
+                        if let (Some(name), Some(args)) = (
+                            call.get("name").and_then(|n| n.as_str()),
+                            call.get("arguments"),
+                        ) {
+                            println!("[PARSER]   Tool {}: name={}", i, name);
+                            tools.push((name.to_string(), args.clone()));
+                        }
+                    }
+                } else {
+                    println!("[PARSER] ✗ tool_calls field not found or not an array");
+                    if let Some(tc) = parsed.get("tool_calls") {
+                        println!("[PARSER] tool_calls value: {:?}", tc);
+                    }
                 }
+                Ok(tools)
+            }
+            Err(e) => {
+                println!("[PARSER] ✗ JSON parse error: {}", e);
+                Err(anyhow!("JSON parse error: {}", e))
             }
         }
-        Ok(tools)
     } else {
+        println!("[PARSER] ✗ Could not find {{ or }}");
         Err(anyhow!("Could not parse tool calls from Claude response"))
+    }
+}
+
+/// Submit a proof to zk-attestation-service for independent verification
+pub async fn submit_proof_to_attestation_service(
+    client: &reqwest::Client,
+    attestation_service_url: &str,
+    session_id: &str,
+    proof: &CryptographicProof,
+) -> Result<String> {
+    let submit_url = format!("{}/proofs/submit", attestation_service_url);
+    
+    let payload = json!({
+        "session_id": session_id,
+        "tool_name": proof.tool_name,
+        "timestamp": proof.timestamp,
+        "request": proof.request,
+        "response": proof.response,
+        "proof": proof.proof,
+        "verified": proof.verified,
+        "onchain_compatible": proof.onchain_compatible,
+        "submitted_by": "agent-a",
+        "workflow_stage": "pricing",
+        "display_response": proof.display_response,
+        "redaction_metadata": proof.redaction_metadata,
+    });
+    
+    let response = client
+        .post(&submit_url)
+        .json(&payload)
+        .send()
+        .await?;
+    
+    if !response.status().is_success() {
+        let error_text = response.text().await?;
+        return Err(anyhow!("Failed to submit proof: {}", error_text));
+    }
+    
+    let result: Value = response.json().await?;
+    
+    if let Some(proof_id) = result.get("proof_id").and_then(|p| p.as_str()) {
+        println!("[PROOF] ✓ Proof submitted to attestation service: {}", proof_id);
+        Ok(proof_id.to_string())
+    } else {
+        Err(anyhow!("No proof_id in response from attestation service"))
     }
 }
 
@@ -824,6 +918,7 @@ pub async fn call_server_tool(
     }
 }
 
+
 /// Complete a flight booking with payment processing
 pub async fn complete_booking_with_payment(
     config: &AgentConfig,
@@ -851,6 +946,10 @@ pub async fn complete_booking_with_payment(
     let session_id = session_id.to_string();
     let mut enrollment_token_id = "token_789".to_string();
     let mut enrollment_complete = false;
+    
+    // NOTE: Proof verification is now delegated to Payment-Agent
+    // Agent-A does NOT send proofId to payment tools.
+    // Instead, Payment-Agent queries attestation service with sessionId to find and verify proofs.
 
     // Step 1: Check if card is already enrolled
     if let Some(payment_url) = payment_agent_url {
@@ -881,6 +980,10 @@ pub async fn complete_booking_with_payment(
             "consumerId": "user_123",
             "enrollmentReferenceId": "enroll_ref_456"
         });
+        
+        // NOTE: proofId NOT sent here. Payment-Agent queries attestation service
+        // with sessionId to find and verify proofs autonomously.
+        // This prevents Agent-A from dictating which proof to verify.
 
         match call_server_tool(
             &client,
@@ -929,6 +1032,10 @@ pub async fn complete_booking_with_payment(
             "amount": price.to_string(),
             "merchant": "ZeroProof Travel"
         });
+        
+        // NOTE: proofId NOT sent here. Payment-Agent queries attestation service
+        // with sessionId to find pricing proofs and verify amount matches.
+        // Payment-Agent is responsible for proof selection and verification.
 
         match call_server_tool(
             &client,
@@ -969,6 +1076,10 @@ pub async fn complete_booking_with_payment(
             "instructionId": instruction_id,
             "transactionReferenceId": "txn_202"
         });
+        
+        // NOTE: proofId NOT sent here. Payment-Agent has already queried and verified
+        // proofs during earlier payment steps (enroll-card, initiate-purchase-instruction).
+        // This step retrieves the final credentials based on verified payment state.
 
         match call_server_tool(
             &client,
@@ -1014,16 +1125,40 @@ pub async fn complete_booking_with_payment(
                 state.cryptographic_traces.push(crypto_proof.clone());
                 println!("[PROOF] Collected proof for book-flight: {}", state.cryptographic_traces.len());
                 
-                // Submit proof to database asynchronously
+                // Submit proof to agent-a database asynchronously
                 let server_url = config.server_url.clone();
-                let session_id_str = session_id.to_string();
+                let session_id_db = session_id.to_string();
+                let crypto_proof_db = crypto_proof.clone();
                 tokio::spawn(async move {
-                    match submit_proof_to_database(&server_url, &session_id_str, &crypto_proof).await {
+                    match submit_proof_to_database(&server_url, &session_id_db, &crypto_proof_db).await {
                         Ok(proof_id) => {
-                            println!("[PROOF] Submitted proof to database: {}", proof_id);
+                            println!("[PROOF] Submitted proof to agent-a database: {}", proof_id);
                         }
                         Err(e) => {
-                            eprintln!("[PROOF] Failed to submit proof to database: {}", e);
+                            eprintln!("[PROOF] Failed to submit proof to agent-a database: {}", e);
+                        }
+                    }
+                });
+                
+                // Submit proof to zk-attestation-service for independent verification
+                let attestation_url = std::env::var("ATTESTATION_SERVICE_URL")
+                    .unwrap_or_else(|_| "http://localhost:8001".to_string());
+                let session_id_attest = session_id.to_string();
+                let client_attest = reqwest::Client::new();
+                let crypto_proof_attest = crypto_proof.clone();
+                
+                tokio::spawn(async move {
+                    match submit_proof_to_attestation_service(
+                        &client_attest,
+                        &attestation_url,
+                        &session_id_attest,
+                        &crypto_proof_attest
+                    ).await {
+                        Ok(proof_id) => {
+                            println!("[PROOF] Submitted proof to attestation service: {}", proof_id);
+                        }
+                        Err(e) => {
+                            eprintln!("[PROOF] Failed to submit proof to attestation service: {}", e);
                         }
                     }
                 });
@@ -1148,6 +1283,11 @@ pub async fn process_user_query(
     // Parse tool calls
     match parse_tool_calls(&claude_response) {
         Ok(tool_calls) => {
+            println!("[PARSE] Successfully parsed {} tool calls", tool_calls.len());
+            for (name, _) in &tool_calls {
+                println!("[PARSE] - Tool: {}", name);
+            }
+            
             if tool_calls.is_empty() {
                 // No tools needed, return Claude's response
                 updated_messages.push(ClaudeMessage {
@@ -1193,19 +1333,50 @@ pub async fn process_user_query(
                                         state.cryptographic_traces.push(crypto_proof.clone());
                                         println!("[PROOF] Collected proof for {}: {}", tool_name, state.cryptographic_traces.len());
                                         
-                                        // Submit proof to database asynchronously
+                                        // Submit proof to agent-a database asynchronously
                                         let server_url = config.server_url.clone();
-                                        let session_id = session_id.to_string();
+                                        let session_id_db = session_id.to_string();
+                                        let crypto_proof_db = crypto_proof.clone();
                                         tokio::spawn(async move {
-                                            match submit_proof_to_database(&server_url, &session_id, &crypto_proof).await {
+                                            match submit_proof_to_database(&server_url, &session_id_db, &crypto_proof_db).await {
                                                 Ok(proof_id) => {
-                                                    println!("[PROOF] Submitted proof to database: {}", proof_id);
+                                                    println!("[PROOF] Submitted proof to agent-a database: {}", proof_id);
                                                 }
                                                 Err(e) => {
-                                                    eprintln!("[PROOF] Failed to submit proof to database: {}", e);
+                                                    eprintln!("[PROOF] Failed to submit proof to agent-a database: {}", e);
                                                 }
                                             }
                                         });
+                                        
+                                        // Submit proof to zk-attestation-service for independent verification
+                                        let attestation_url = std::env::var("ATTESTATION_SERVICE_URL")
+                                            .unwrap_or_else(|_| "http://localhost:8001".to_string());
+                                        let session_id_attest = session_id.to_string();
+                                        let client_attest = reqwest::Client::new();
+                                        let crypto_proof_attest = crypto_proof.clone();
+                                        
+                                        // Capture the proof_id for reference (proof already in cryptographic_traces)
+                                        let _proof_id_capture = crypto_proof.proof_id.clone();
+                                        
+                                        tokio::spawn(async move {
+                                            match submit_proof_to_attestation_service(
+                                                &client_attest,
+                                                &attestation_url,
+                                                &session_id_attest,
+                                                &crypto_proof_attest
+                                            ).await {
+                                                Ok(proof_id) => {
+                                                    println!("[PROOF] Submitted proof to attestation service: {}", proof_id);
+                                                }
+                                                Err(e) => {
+                                                    eprintln!("[PROOF] Failed to submit proof to attestation service: {}", e);
+                                                }
+                                            }
+                                        });
+                                        
+                                        // Store proof_id in map for payment verification
+                                        // Note: proof is already stored in state.cryptographic_traces above
+                                        // Single source of truth is cryptographic_traces, not a separate proof_map
                                     }
                                     
                                     if let Ok(parsed) = serde_json::from_str::<Value>(&result) {
@@ -1233,6 +1404,7 @@ pub async fn process_user_query(
                         state.from = from.clone();
                         state.to = to.clone();
                         state.price = price;
+                        // Proof already stored in cryptographic_traces when it was captured
                         
                         let response = format!(
                             "Agent A: Great! I found a flight from {} to {} for ${}.\n\nThis includes all taxes and fees.\n\nTo complete your booking, please provide:\n1. Your full name\n2. Your email address\n\nGive me your fullname first!",
@@ -1404,8 +1576,12 @@ pub async fn process_user_query(
                 }
             }
         }
-        Err(_) => {
-            // Parse failed, return as conversational response
+        Err(e) => {
+            // Parse failed, log details and return raw response
+            eprintln!("[PARSE ERROR] Failed to parse tool calls: {}", e);
+            eprintln!("[PARSE ERROR] Claude response (first 500 chars): {}", 
+                     &claude_response[..claude_response.len().min(500)]);
+            
             let response = format!("Agent A: {}", claude_response);
             updated_messages.push(ClaudeMessage {
                 role: "assistant".to_string(),
