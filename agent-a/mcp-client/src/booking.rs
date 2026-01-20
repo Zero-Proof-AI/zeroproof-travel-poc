@@ -51,6 +51,7 @@ pub async fn get_ticket_pricing(
                 println!("[PROOF] Collected proof for get-ticket-price: {}", state.cryptographic_traces.len());
                 
                 // Submit proof to agent-a database asynchronously
+                // Note: agent-a database handles forwarding to attestation service
                 let server_url = config.server_url.clone();
                 let session_id_db = session_id.to_string();
                 let crypto_proof_db = crypto_proof.clone();
@@ -61,29 +62,6 @@ pub async fn get_ticket_pricing(
                         }
                         Err(e) => {
                             eprintln!("[PROOF] Failed to submit proof to agent-a database: {}", e);
-                        }
-                    }
-                });
-                
-                // Submit proof to zk-attestation-service for independent verification
-                let attestation_url = std::env::var("ATTESTATION_SERVICE_URL")
-                    .unwrap_or_else(|_| "http://localhost:8000".to_string());
-                let session_id_attest = session_id.to_string();
-                let client_attest = reqwest::Client::new();
-                let crypto_proof_attest = crypto_proof.clone();
-                
-                tokio::spawn(async move {
-                    match submit_proof_to_attestation_service(
-                        &client_attest,
-                        &attestation_url,
-                        &session_id_attest,
-                        &crypto_proof_attest
-                    ).await {
-                        Ok(proof_id) => {
-                            println!("[PROOF] ✓ Proof submitted to attestation service for {}: {}", crypto_proof_attest.tool_name, proof_id);
-                        }
-                        Err(e) => {
-                            eprintln!("[PROOF] ✗ Failed to submit proof to attestation service for {}: {}", crypto_proof_attest.tool_name, e);
                         }
                     }
                 });
@@ -305,6 +283,7 @@ pub async fn complete_booking_with_payment(
                 println!("[PROOF] Collected proof for book-flight: {}", state.cryptographic_traces.len());
                 
                 // Submit proof to agent-a database asynchronously
+                // Note: agent-a database handles forwarding to attestation service
                 let server_url = config.server_url.clone();
                 let session_id_db = session_id.to_string();
                 let crypto_proof_db = crypto_proof.clone();
@@ -315,29 +294,6 @@ pub async fn complete_booking_with_payment(
                         }
                         Err(e) => {
                             eprintln!("[PROOF] Failed to submit proof to agent-a database: {}", e);
-                        }
-                    }
-                });
-                
-                // Submit proof to zk-attestation-service for independent verification
-                let attestation_url = std::env::var("ATTESTATION_SERVICE_URL")
-                    .unwrap_or_else(|_| "http://localhost:8000".to_string());
-                let session_id_attest = session_id.to_string();
-                let client_attest = reqwest::Client::new();
-                let crypto_proof_attest = crypto_proof.clone();
-                
-                tokio::spawn(async move {
-                    match submit_proof_to_attestation_service(
-                        &client_attest,
-                        &attestation_url,
-                        &session_id_attest,
-                        &crypto_proof_attest
-                    ).await {
-                        Ok(proof_id) => {
-                            println!("[PROOF] ✓ Proof submitted to attestation service for {}: {}", crypto_proof_attest.tool_name, proof_id);
-                        }
-                        Err(e) => {
-                            eprintln!("[PROOF] ✗ Failed to submit proof to attestation service for {}: {}", crypto_proof_attest.tool_name, e);
                         }
                     }
                 });
