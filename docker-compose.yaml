@@ -1,11 +1,50 @@
 version: '3.8'
 services:
+  # Agent A MCP Server (Rust) - exposes ZK operations
+  agent-a-mcp:
+    build:
+      context: .
+      dockerfile: agent-a/mcp-server/Dockerfile
+    environment:
+      AGENT_B_URL: http://agent-b:8001
+      ATTESTER_URL: http://localhost:8000
+      ZEROPROOF_ADDRESS: "0x9C33252D29B41Fe2706704a8Ca99E8731B58af41"
+      RPC_URL: "http://json-rpc.9lmur1sx205wod4wavn42kr8r.blockchainnodeengine.com/?key=AIzaSyBanzf369uxM4kL0EHhXh5HSZpk3J8_4nA"
+      RUST_LOG: info
+    stdin_open: true
+    tty: true
+    depends_on:
+      - zeroproof
+    networks:
+      - zk-network
+
+  # Attester Service
   zeroproof:
     build: .
     ports:
       - "8000:8000"
     env_file: .env
+    networks:
+      - zk-network
+
+  # Agent B Service
+  agent-b:
+    build: ./agent-b
+    ports:
+      - "8001:8001"
+    environment:
+      PORT: 8001
+    networks:
+      - zk-network
+
+  # Frontend
   frontend:
     build: ./frontend
     ports:
       - "3000:3000"
+    networks:
+      - zk-network
+
+networks:
+  zk-network:
+    driver: bridge

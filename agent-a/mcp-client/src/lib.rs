@@ -3,5 +3,9 @@
 
 pub mod orchestration;
 pub mod proxy_fetch;
+pub mod shared;
+pub mod prompts;
+pub mod booking;
 
-pub use orchestration::{AgentConfig, BookingState, ClaudeMessage, process_user_query, CryptographicProof, submit_proof_to_database};
+pub use orchestration::{AgentConfig, BookingState, ClaudeMessage, process_user_query};
+pub use shared::{submit_proof_to_database, CryptographicProof, RedactionMetadata};

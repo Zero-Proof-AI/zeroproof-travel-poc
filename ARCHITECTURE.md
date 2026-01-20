@@ -5,48 +5,76 @@
 Multi-agent zero-knowledge proof system with universal verification:
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Agent A (Consumer)                           │
-│  Requests service → Gets proof → Verifies on-chain              │
-└────────┬──────────────────────────────────────┬─────────────────┘
-         │                                      │
-         ▼                                      ▼
-┌──────────────────────┐                ┌──────────────────────┐
-│   Agent B Server     │                │  Sepolia Testnet     │
-│  - Pricing service   │                │  Universal Verifier  │
-│  - Booking service   │                │  0x53A9038dCB210...  │
-│  - ELF registration  │                └──────────────────────┘
-└──────────┬───────────┘                          ▲
-           │                                      │
-           ▼                                      │
-┌──────────────────────────────────────────────────────────┐
-│    ZK Attester Service (GPU-accelerated)                 │
-│ - Receives ELF from Agent B                              │
-│ - STARK proof generation (GPU, 11-27 min)                │
-│ - Groth16 proof generation (<1 min)                      │
-│ - Returns: proof + vk_hash + public_values               │
-└──────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│                  Claude AI (Orchestration)                              │
+│         Decides workflow, interprets results, handles errors             │
+└────────┬──────────────────────────────────────────────┬──────────────────┘
+         │                                              │
+         ▼                                              ▼
+┌──────────────────────┐         ┌──────────────────────────────┐
+│ Agent A MCP Server   │         │  Python MCP Client          │
+│ (Rust - High Perf)   │◄───────►│  (Claude Integration)       │
+│ - call_agent_b       │         │  - agent-service package    │
+│ - format_zk_input    │         │  - Shared Agent core        │
+│ - request_attestation│         └──────────────────────────────┘
+│ - verify_on_chain    │
+└──────────┬───────────┘
+           │ (HTTP Requests)
+    ┌──────┴────────┬──────────────────┬──────────────────┐
+    ▼               ▼                  ▼                  ▼
+┌────────────┐ ┌────────────┐  ┌──────────────┐  ┌──────────────┐
+│ Agent B    │ │ Attester   │  │ ZeroProof    │  │ Sepolia      │
+│ Server     │ │ Service    │  │ Contract     │  │ Testnet      │
+│ - Pricing  │ │ - STARK    │  │ - Verifier   │  │ - RPC        │
+│ - Booking  │ │ - Groth16  │  │   (15+ min)  │  │   Endpoint   │
+│ - ELF Reg  │ │   (GPU)    │  │              │  │              │
+└────────────┘ └────────────┘  └──────────────┘  └──────────────┘
 ```
 
 ## Component Details
 
-### 1. Agent A (Consumer)
+### 1. Agent A - Rust MCP Server
 
-**Location**: `/agent-a/`
+**Location**: `/agent-a/mcp-server/`
 
-**Purpose**: Consumes Agent B services with cryptographic verification
+**Technology**: Rust + rmcp SDK (Model Context Protocol)
+
+**Purpose**: Exposes ZK operations as MCP tools for Claude orchestration
+
+**Architecture**:
+- `src/lib.rs`: Core reusable functions (verify_on_chain, call_agent_b, etc.)
+- `src/main.rs`: MCP server & tool wrappers using `#[tool_router]` macro
+- Stdio transport (works with Claude Desktop, MCP Inspector, Python clients)
+
+**Tools Exposed**:
+
+1. **call_agent_b**: Get pricing and program ID from Agent B
+   ```
+   Input: { from: "NYC", to: "LON", vip: true }
+   Output: { price: 578.0, program_id: uuid, elf_hash: 0x... }
+   ```
+
+2. **format_zk_input**: Format input for zkVM computation
+   ```
+   Input: { endpoint: "price", input: {...} }
+   Output: { input_hex: "0x...", input_array: [...], length: 256 }
+   ```
+
+3. **request_attestation**: Request ZK proof from attester (⏱️ 11-27 min)
+   ```
+   Input: { program_id, input_hex, claimed_output }
+   Output: { proof, public_values, vk_hash, verified_output }
+   ```
+
+4. **verify_on_chain**: Verify proof on Sepolia blockchain
+   ```
+   Input: { proof, public_values, vk_hash }
+   Output: { verified: true/false, details: "..." }
+   ```
 
 **Flow**:
 ```
-1. HTTP POST http://localhost:8001/price
-   ├─ Request: { from: "NYC", to: "LON", vip: true }
-   ├─ Response: { data: {"price":578.0}, program_id: uuid, elf_hash: 0x... }
-   └─ Store: program_id
-
-2. HTTP POST http://localhost:8001/zk-input
-   ├─ Request: { endpoint: "price", input: {...} }
-   ├─ Response: { input_bytes: [1,2,3...] }
-   └─ Get properly formatted zkVM input
+Claude → MCP Protocol (stdio) → Rust Server → HTTP Calls → Agent B/Attester/Blockchain
 
 3. HTTP POST http://localhost:8000/attest
    ├─ Payload: { program_id, input_bytes, claimed_output, verify_locally: true }
@@ -64,25 +92,78 @@ Multi-agent zero-knowledge proof system with universal verification:
 **Environment Variables**:
 - `AGENT_B_URL`: Agent B endpoint (default: http://localhost:8001)
 - `ATTESTER_URL`: Attester endpoint (default: http://localhost:8000)
-- `SP1_VERIFIER_ADDRESS`: Universal verifier contract (default: 0x53A9038dCB210D210A7C973fA066Fd2C50aa8847)
-- `RPC_URL`: Sepolia RPC endpoint
-- `RPC_URL`: Libertas RPC endpoint (optional; if missing, skips on-chain verify)
+- `ZEROPROOF_ADDRESS`: ZeroProof contract on Sepolia (default: 0x9C33252D29B41Fe...)
+- `RPC_URL`: Sepolia RPC endpoint for verification
 
-**Key Code**:
-- Main loop: waits for user input, calls Agent B, attester, contract
-- `verify_on_chain()`: encodes proof + inputs, calls contract via JSON-RPC
+**Key Features**:
+- Performance: 100% Rust implementation for speed
+- Type Safety: Schemars validates tool parameters as JSON schema
+- Reusable: Original Rust logic extracted into library functions
+- Flexible: Works standalone or orchestrated by Claude
 
 **Dependencies**:
+- rmcp (Rust MCP SDK with macros)
+- tokio (async runtime)
+- ethers (ABI encoding)
 - reqwest (HTTP client)
-- serde_json (JSON parsing)
-- ethers::abi (ABI encoding)
-- hex (hex encoding/decoding)
+- serde/schemars (serialization + schema)
 
 ---
 
-### 2. Agent B Server (Multi-function Provider)
+### 2. Agent A - Python MCP Client
+
+**Location**: `/agent-service/mcp_client/agent_a/`
+
+**Technology**: Python + Anthropic Claude API
+
+**Purpose**: Provides intelligent orchestration via Claude for Agent A Rust MCP server
+
+**Architecture**:
+- Uses `shared/agent/core.py`: Agent class with MCP client support
+- Launches Rust MCP server as subprocess via stdio transport
+- Claude interprets tool descriptions and decides workflow
+
+**Capabilities**:
+- Interactive chat interface
+- Automatic tool calling based on Claude's reasoning
+- Error recovery and retry logic
+- Natural language workflow orchestration
+
+**Example Conversation**:
+```
+User: "Get pricing from NYC to London for a VIP customer"
+
+Claude: "I'll help you get pricing and generate a cryptographic proof.
+Step 1: Calling Agent B for pricing..."
+[Claude calls: call_agent_b(from='NYC', to='London', vip=true)]
+
+Result: Price is $578, program_id is 'abc-123', elf_hash is '0x...'
+
+Step 2: Formatting ZK input..."
+[Claude calls: format_zk_input(endpoint='price', input={...})]
+
+Result: Input formatted to 256 bytes
+
+Step 3: This will take ~15 minutes for proof generation. Requesting attestation..."
+[Claude calls: request_attestation(program_id='abc-123', input_hex='0x...')]
+
+[Waiting 15 minutes...]
+
+Result: Proof generated! Got public_values and vk_hash.
+
+Step 4: Verifying on Sepolia blockchain..."
+[Claude calls: verify_on_chain(proof='0x...', public_values='0x...', vk_hash='0x...')]
+
+Result: ✅ Verified! The pricing data ($578) is cryptographically valid on-chain."
+```
+
+---
+
+### 3. Agent B Server (Multi-function Provider)
 
 **Location**: `/agent-b/`
+
+**Technology**: Rust
 
 **Purpose**: Multi-function service (pricing + booking) with zkVM proof support
 
@@ -104,7 +185,7 @@ Multi-agent zero-knowledge proof system with universal verification:
 ```json
 Request: { "from": "NYC", "to": "LON", "vip": true }
 Response: {
-  "data": {"price": 578.0},
+  "data": "578.0",
   "program_id": "89456604-93dd-4aa5-bf70-109367ef33ad",
   "elf_hash": "0x8e93c12ab6da873e..."
 }
