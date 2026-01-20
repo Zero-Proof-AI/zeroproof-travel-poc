@@ -56,12 +56,23 @@ const ChatInterface: React.FC = () => {
   const [proofModalLoading, setProofModalLoading] = useState(false);
   const [socket, setSocket] = useState<WebSocket | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
+  const progressMessagesRef = React.useRef<string[]>([]);
   const messagesEndRef = React.useRef<HTMLDivElement>(null);
 
   // Backend URLs - point to Agent A HTTP/WebSocket Server
   // For local: http://localhost:3001, ws://localhost:3001
   // For production: https://dev.agenta.zeroproofai.com, wss://dev.agenta.zeroproofai.com
+  
+  
+  // Local environment
+  // const baseUrl = 'http://localhost:3001';
+  // Test Environment
   const baseUrl = 'https://dev.agenta.zeroproofai.com';
+  
+  // const backendApiUrl = 'http://localhost:3001/chat';
+  // const proofsApiUrl = 'http://localhost:3001/proofs';
+  // const verifyProofUrl = 'http://localhost:3001/proofs/verify';
+ 
   const wsUrl = baseUrl.replace('https://', 'wss://').replace('http://', 'ws://');
   const proofsApiUrl = `${baseUrl}/proofs`;
   const verifyProofUrl = `${baseUrl}/proofs/verify`;
@@ -101,37 +112,49 @@ const ChatInterface: React.FC = () => {
           setSessionId(data.session_id);
         }
 
-        // Handle progress messages (real-time updates)
-        if (data.progress) {
+        // Handle progress messages (real-time updates) - accumulate them
+        if (data.progress && !data.response) {
           console.log('[WEBSOCKET] Progress update:', data.progress);
-          const progressMessage: ChatMessage = {
-            role: 'assistant',
-            content: data.progress,
-          };
-          setMessages((prev) => [...prev, progressMessage]);
+          progressMessagesRef.current.push(data.progress);
         }
         // Handle final response messages
-        else if (data.success && data.response) {
+        if (data.success && data.response) {
+          console.log('[WEBSOCKET] Final response:', data.response);
+          
+          // Combine all accumulated progress messages with the final response
+          const combinedContent = progressMessagesRef.current.length > 0
+            ? progressMessagesRef.current.join('\n\n') + '\n\n' + data.response
+            : data.response;
+
           const assistantMessage: ChatMessage = {
             role: 'assistant',
-            content: data.response,
+            content: combinedContent,
           };
           setMessages((prev) => [...prev, assistantMessage]);
+          progressMessagesRef.current = []; // Reset progress messages
           setLoading(false);
           
           // Fetch proofs after agent responds
+          console.log('[WEBSOCKET] Agent responded, triggering proof fetch for session:', data.session_id);
           setTimeout(() => {
-            if (sessionId) {
-              fetchProofsAutomatically();
+            if (data.session_id) {
+              fetchProofsWithSession(data.session_id);
             }
           }, 500);
         } else if (data.error) {
           console.error('[WEBSOCKET] Error from server:', data.error);
+          
+          // Combine progress messages with error
+          const combinedContent = progressMessagesRef.current.length > 0
+            ? progressMessagesRef.current.join('\n\n') + '\n\nError: ' + (data.error || 'Unknown error')
+            : `Error: ${data.error || 'Unknown error'}`;
+
           const errorMessage: ChatMessage = {
             role: 'assistant',
-            content: `Error: ${data.error || 'Unknown error'}`,
+            content: combinedContent,
           };
           setMessages((prev) => [...prev, errorMessage]);
+          progressMessagesRef.current = []; // Reset progress messages
           setLoading(false);
         }
       } catch (error) {
@@ -175,8 +198,12 @@ const ChatInterface: React.FC = () => {
 
   // Fetch proofs automatically (for polling) - no loading state to avoid blinking
   const fetchProofsAutomatically = useCallback(async () => {
-    if (!sessionId) return;
+    if (!sessionId) {
+      console.log('[PROOFS] Skipping fetch - no sessionId');
+      return;
+    }
     
+    console.log('[PROOFS] Fetching proofs for sessionId:', sessionId);
     try {
       const response = await axios.get(`${proofsApiUrl}/${sessionId}`);
       if (response.data.success) {
@@ -204,6 +231,20 @@ const ChatInterface: React.FC = () => {
       console.error('Error fetching proofs:', error);
     }
   }, [sessionId, proofsApiUrl]);
+
+  // Fetch proofs with specific session ID (for immediate use after WebSocket message)
+  const fetchProofsWithSession = useCallback(async (targetSessionId: string) => {
+    console.log('[PROOFS] Fetching proofs for specific sessionId:', targetSessionId);
+    try {
+      const response = await axios.get(`${proofsApiUrl}/${targetSessionId}`);
+      if (response.data.success) {
+        setProofs(response.data.proofs);
+        console.log('[PROOFS] Fetched and set proofs:', response.data.proofs.length);
+      }
+    } catch (error) {
+      console.error('Error fetching proofs:', error);
+    }
+  }, [proofsApiUrl]);
 
   // Fetch proofs manually (for manual refresh button) - shows loading state
   const fetchProofs = useCallback(async () => {
@@ -252,6 +293,7 @@ const ChatInterface: React.FC = () => {
 
     try {
       setLoading(true);
+      progressMessagesRef.current = []; // Reset progress messages for new request
 
       // Ensure WebSocket is connected
       if (!socket || socket.readyState !== WebSocket.OPEN) {
