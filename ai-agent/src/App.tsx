@@ -101,7 +101,17 @@ const ChatInterface: React.FC = () => {
           setSessionId(data.session_id);
         }
 
-        if (data.success && data.response) {
+        // Handle progress messages (real-time updates)
+        if (data.progress) {
+          console.log('[WEBSOCKET] Progress update:', data.progress);
+          const progressMessage: ChatMessage = {
+            role: 'assistant',
+            content: data.progress,
+          };
+          setMessages((prev) => [...prev, progressMessage]);
+        }
+        // Handle final response messages
+        else if (data.success && data.response) {
           const assistantMessage: ChatMessage = {
             role: 'assistant',
             content: data.response,

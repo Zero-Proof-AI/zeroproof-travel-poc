@@ -189,7 +189,7 @@ async fn chat(
     // Process the user query with full conversation history and state
     println!("[PROCESSING] Starting orchestration - User message: '{}'", &payload.message[..payload.message.len().min(100)]);
     
-    match process_user_query(&config, &payload.message, &session.messages, &mut session.state, &session_id).await {
+    match process_user_query(&config, &payload.message, &session.messages, &mut session.state, &session_id, None).await {
         Ok((response, updated_messages, updated_state)) => {
             // Update session with new messages and state
             let message_count = updated_messages.len();
@@ -238,7 +238,8 @@ async fn websocket_chat(
 async fn handle_websocket(socket: WebSocket, sessions: SessionManager) {
     println!("[WEBSOCKET] New connection established");
 
-    let (mut sender, mut receiver) = socket.split();
+    let (sender, mut receiver) = socket.split();
+    let sender = Arc::new(Mutex::new(sender));
     let mut session_id: Option<String> = None;
 
     // Initialize config once for this connection
@@ -254,10 +255,32 @@ async fn handle_websocket(socket: WebSocket, sessions: SessionManager) {
                 "error": format!("Configuration error: {}", e),
                 "session_id": null
             });
-            let _ = sender.send(Message::Text(error_msg.to_string())).await;
+            let _ = sender.lock().await.send(Message::Text(error_msg.to_string())).await;
             return;
         }
     };
+
+    // Create progress channel for real-time updates
+    let (progress_tx, progress_rx) = tokio::sync::mpsc::channel::<String>(32);
+    
+    // Clone sender for the progress task
+    let sender_clone = Arc::clone(&sender);
+    let session_id_clone = session_id.clone();
+
+    // Spawn task to forward progress messages to WebSocket
+    tokio::spawn(async move {
+        let mut progress_rx = progress_rx;
+        while let Some(progress_msg) = progress_rx.recv().await {
+            let progress_json = serde_json::json!({
+                "progress": progress_msg,
+                "session_id": session_id_clone
+            });
+            if let Err(e) = sender_clone.lock().await.send(Message::Text(progress_json.to_string())).await {
+                println!("[WEBSOCKET] Error sending progress: {}", e);
+                break;
+            }
+        }
+    });
 
     // Message handling loop
     while let Some(msg) = receiver.next().await {
@@ -292,8 +315,8 @@ async fn handle_websocket(socket: WebSocket, sessions: SessionManager) {
                         println!("[WEBSOCKET] Retrieved session - State: {}, Messages: {}",
                                  session.state.step, session.messages.len());
                         
-                        // Process the user query
-                        match process_user_query(&config, &payload.message, &session.messages, &mut session.state, &session_id_for_processing).await {
+                        // Process the user query with progress channel
+                        match process_user_query(&config, &payload.message, &session.messages, &mut session.state, &session_id_for_processing, Some(progress_tx.clone())).await {
                             Ok((response, updated_messages, updated_state)) => {
                                 // Update session with new messages and state
                                 let message_count = updated_messages.len();
@@ -311,7 +334,7 @@ async fn handle_websocket(socket: WebSocket, sessions: SessionManager) {
                                     "session_id": session_id_for_processing
                                 });
 
-                                if let Err(e) = sender.send(Message::Text(response_msg.to_string())).await {
+                                if let Err(e) = sender.lock().await.send(Message::Text(response_msg.to_string())).await {
                                     println!("[WEBSOCKET] Error sending response: {}", e);
                                     break;
                                 }
@@ -325,7 +348,7 @@ async fn handle_websocket(socket: WebSocket, sessions: SessionManager) {
                                     "session_id": session_id_for_processing
                                 });
 
-                                if let Err(e) = sender.send(Message::Text(error_msg.to_string())).await {
+                                if let Err(e) = sender.lock().await.send(Message::Text(error_msg.to_string())).await {
                                     println!("[WEBSOCKET] Error sending error response: {}", e);
                                     break;
                                 }
@@ -340,7 +363,7 @@ async fn handle_websocket(socket: WebSocket, sessions: SessionManager) {
                             "session_id": session_id
                         });
 
-                        if let Err(e) = sender.send(Message::Text(error_msg.to_string())).await {
+                        if let Err(e) = sender.lock().await.send(Message::Text(error_msg.to_string())).await {
                             println!("[WEBSOCKET] Error sending parse error: {}", e);
                             break;
                         }

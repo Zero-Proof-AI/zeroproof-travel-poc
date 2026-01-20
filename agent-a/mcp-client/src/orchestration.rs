@@ -96,8 +96,18 @@ pub async fn process_user_query(
     messages: &[ClaudeMessage],
     state: &mut BookingState,
     session_id: &str,
+    progress_tx: Option<tokio::sync::mpsc::Sender<String>>,
 ) -> Result<(String, Vec<ClaudeMessage>, BookingState)> {
     let client = reqwest::Client::new();
+
+    // Helper to send progress updates
+    async fn send_progress(tx: &Option<tokio::sync::mpsc::Sender<String>>, msg: &str) {
+        if let Some(sender) = tx {
+            let _ = sender.send(msg.to_string()).await;
+        }
+    }
+
+    send_progress(&progress_tx, "🔄 Processing request...").await;
 
     // Fetch tool definitions
     let agent_b_url = std::env::var("AGENT_B_MCP_URL")
@@ -118,6 +128,7 @@ pub async fn process_user_query(
        (state.step == "passenger_email" && state.passenger_email.is_none()) ||
        (state.step == "payment_method") {
         println!("[EXTRACTION MODE] Detected extraction state: '{}' - skipping tool-based Claude call", state.step);
+        send_progress(&progress_tx, "📝 Extracting passenger information...").await;
         
         let mut updated_messages = messages.to_vec();
         
@@ -213,6 +224,7 @@ pub async fn process_user_query(
 
     // Call Claude with full message history
     let claude_response = call_claude(&client, config, user_query, messages, state, &tool_definitions, None).await?;
+    send_progress(&progress_tx, "✅ Claude processed request").await;
     // Build updated message list
     let mut updated_messages = messages.to_vec();
     
@@ -248,9 +260,12 @@ pub async fn process_user_query(
                             state.to = to.to_string();
                             state.step = "passenger_name".to_string();
                             
+                            send_progress(&progress_tx, &format!("🔍 Fetching pricing for {} → {}", from, to)).await;
+                            
                             // Call get_ticket_pricing to fetch pricing and collect proof
                             match get_ticket_pricing(&config, &session_id, from, to, state).await {
                                 Ok(pricing_result) => {
+                                    send_progress(&progress_tx, "💰 Pricing received").await;
                                     println!("[PRICING] Fetched: {}", pricing_result);
                                     
                                     // Parse pricing result to extract price
@@ -369,6 +384,7 @@ pub async fn process_user_query(
 
                             // Update state to payment
                             state.step = "payment".to_string();
+                            send_progress(&progress_tx, &format!("💳 Processing payment for {} booking", passenger_name)).await;
 
                             match complete_booking_with_payment(
                                 config,
@@ -383,6 +399,7 @@ pub async fn process_user_query(
                             .await
                             {
                                 Ok(result) => {
+                                    send_progress(&progress_tx, "✅ Booking completed successfully").await;
                                     state.step = "completed".to_string();
                                     updated_messages.push(ClaudeMessage {
                                         role: "assistant".to_string(),
