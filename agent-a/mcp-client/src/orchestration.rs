@@ -8,9 +8,9 @@
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use crate::shared::{fetch_all_tools, parse_tool_calls, call_claude, call_server_tool, call_server_tool_with_proof, submit_proof_to_attestation_service, submit_proof_to_database, CryptographicProof};
+use crate::shared::{fetch_all_tools, parse_tool_calls, call_claude, call_server_tool, CryptographicProof};
 use crate::prompts::extract_with_claude;
-use crate::booking::complete_booking_with_payment;
+use crate::booking::{complete_booking_with_payment, get_ticket_pricing};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ClaudeMessage {
@@ -238,130 +238,69 @@ pub async fn process_user_query(
                     .any(|(name, _)| name == "get-ticket-price");
 
                 if is_pricing_request {
-                    // Execute pricing tool and return result with booking prompt
-                    let mut pricing_result = None;
-                    let mut from = String::new();
-                    let mut to = String::new();
-                    let mut price = 0.0;
-                    
-                    for (tool_name, arguments) in &tool_calls {
-                        if tool_name == "get-ticket-price" {
-                            if let Some(f) = arguments.get("from").and_then(|v| v.as_str()) {
-                                from = f.to_string();
-                            }
-                            if let Some(t) = arguments.get("to").and_then(|v| v.as_str()) {
-                                to = t.to_string();
-                            }
-
-                            match call_server_tool_with_proof(
-                                &client,
-                                &config.server_url,
-                                &agent_b_url,
-                                payment_agent_url,
-                                zkfetch_wrapper_url,
-                                tool_name,
-                                arguments.clone(),
-                            )
-                            .await
-                            {
-                                Ok((result, proof)) => {
-                                    // Collect and submit cryptographic proof if available
-                                    if let Some(crypto_proof) = proof {
-                                        state.cryptographic_traces.push(crypto_proof.clone());
-                                        println!("[PROOF] Collected proof for {}: {}", tool_name, state.cryptographic_traces.len());
-                                        
-                                        // Submit proof to agent-a database asynchronously
-                                        let server_url = config.server_url.clone();
-                                        let session_id_db = session_id.to_string();
-                                        let crypto_proof_db = crypto_proof.clone();
-                                        tokio::spawn(async move {
-                                            match submit_proof_to_database(&server_url, &session_id_db, &crypto_proof_db).await {
-                                                Ok(proof_id) => {
-                                                    println!("[PROOF] Submitted proof to agent-a database: {}", proof_id);
-                                                }
-                                                Err(e) => {
-                                                    eprintln!("[PROOF] Failed to submit proof to agent-a database: {}", e);
-                                                }
-                                            }
-                                        });
-                                        
-                                        // Submit proof to zk-attestation-service for independent verification
-                                        let attestation_url = std::env::var("ATTESTATION_SERVICE_URL")
-                                            .unwrap_or_else(|_| "http://localhost:8000".to_string());
-                                        let session_id_attest = session_id.to_string();
-                                        let client_attest = reqwest::Client::new();
-                                        let crypto_proof_attest = crypto_proof.clone();
-                                        
-                                        // Capture the proof_id for reference (proof already in cryptographic_traces)
-                                        let _proof_id_capture = crypto_proof.proof_id.clone();
-                                        
-                                        tokio::spawn(async move {
-                                            match submit_proof_to_attestation_service(
-                                                &client_attest,
-                                                &attestation_url,
-                                                &session_id_attest,
-                                                &crypto_proof_attest
-                                            ).await {
-                                                Ok(proof_id) => {
-                                                    println!("[PROOF] Submitted proof to attestation service: {}", proof_id);
-                                                }
-                                                Err(e) => {
-                                                    eprintln!("[PROOF] ✗ Failed to submit proof to attestation service: {}", e);
-                                                    eprintln!("[PROOF] Please check if attestation service is running and accessible");
-                                                }
-                                            }
-                                        });
-                                        
-                                        // Store proof_id in map for payment verification
-                                        // Note: proof is already stored in state.cryptographic_traces above
-                                        // Single source of truth is cryptographic_traces, not a separate proof_map
-                                    }
+                    // Extract pricing info from Claude for context
+                    if let Some((_, args)) = tool_calls.first() {
+                        if let (Some(from), Some(to)) = (
+                            args.get("from").and_then(|v| v.as_str()),
+                            args.get("to").and_then(|v| v.as_str()),
+                        ) {
+                            state.from = from.to_string();
+                            state.to = to.to_string();
+                            state.step = "passenger_name".to_string();
+                            
+                            // Call get_ticket_pricing to fetch pricing and collect proof
+                            match get_ticket_pricing(&config, &session_id, from, to, state).await {
+                                Ok(pricing_result) => {
+                                    println!("[PRICING] Fetched: {}", pricing_result);
                                     
-                                    if let Ok(parsed) = serde_json::from_str::<Value>(&result) {
-                                        if let Some(p) = parsed.get("price").and_then(|v| v.as_f64()) {
-                                            price = p;
+                                    // Parse pricing result to extract price
+                                    if let Ok(price_json) = serde_json::from_str::<Value>(&pricing_result) {
+                                        if let Some(price) = price_json.get("price").and_then(|p| p.as_f64()) {
+                                            state.price = price;
+                                            println!("[PRICING] Stored price: ${}", price);
                                         }
                                     }
-                                    pricing_result = Some(result);
-                                }
-                                Err(e) => {
-                                    let err_msg = format!("Error fetching pricing: {}", e);
+                                    
+                                    // Add assistant message showing pricing result
                                     updated_messages.push(ClaudeMessage {
                                         role: "assistant".to_string(),
-                                        content: err_msg.clone(),
+                                        content: format!("Great! I found a flight from {} to {} for ${}.", from, to, state.price),
                                     });
-                                    return Ok((err_msg, updated_messages, state.clone()));
+                                    
+                                    // Ask for passenger name
+                                    let response = format!("Agent A: Perfect! I found a flight from {} to {} for ${:.2}.\n\nNow, please provide your full name:", from, to, state.price);
+                                    updated_messages.push(ClaudeMessage {
+                                        role: "assistant".to_string(),
+                                        content: response.clone(),
+                                    });
+                                    return Ok((response, updated_messages, state.clone()));
+                                }
+                                Err(e) => {
+                                    eprintln!("[PRICING] Error: {}", e);
+                                    let response = format!("Agent A: Sorry, I couldn't fetch the pricing information: {}", e);
+                                    updated_messages.push(ClaudeMessage {
+                                        role: "assistant".to_string(),
+                                        content: response.clone(),
+                                    });
+                                    return Ok((response, updated_messages, state.clone()));
                                 }
                             }
+                        } else {
+                            let response = "Agent A: I need valid departure and destination cities to fetch pricing.".to_string();
+                            updated_messages.push(ClaudeMessage {
+                                role: "assistant".to_string(),
+                                content: response.clone(),
+                            });
+                            return Ok((response, updated_messages, state.clone()));
                         }
-                    }
-
-                    if let Some(_pricing) = pricing_result {
-                        // Update state with pricing information
-                        state.step = "passenger_name".to_string();
-                        state.from = from.clone();
-                        state.to = to.clone();
-                        state.price = price;
-                        // Proof already stored in cryptographic_traces when it was captured
-                        
-                        let response = format!(
-                            "Agent A: Great! I found a flight from {} to {} for ${}.\n\nThis includes all taxes and fees.\n\nTo complete your booking, please provide:\n1. Your full name\n2. Your email address\n\nGive me your fullname first!",
-                            from, to, price
-                        );
-                        
+                    } else {
+                        let response = "Agent A: I couldn't extract the flight details. Please provide departure and destination cities.".to_string();
                         updated_messages.push(ClaudeMessage {
                             role: "assistant".to_string(),
                             content: response.clone(),
                         });
-                        
                         return Ok((response, updated_messages, state.clone()));
                     }
-
-                    updated_messages.push(ClaudeMessage {
-                        role: "assistant".to_string(),
-                        content: claude_response.clone(),
-                    });
-                    Ok((format!("Agent A: {}", claude_response), updated_messages, state.clone()))
                 } else {
                     // Check if this is a booking confirmation with payment
                     let is_booking_with_payment = tool_calls.iter()

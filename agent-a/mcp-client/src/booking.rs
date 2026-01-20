@@ -6,6 +6,97 @@ use serde_json::{json, Value};
 use crate::orchestration::{AgentConfig, BookingState};
 use crate::shared::{call_server_tool, call_server_tool_with_proof, submit_proof_to_attestation_service, submit_proof_to_database};
 
+/// Fetch ticket pricing with proof collection
+pub async fn get_ticket_pricing(
+    config: &AgentConfig,
+    session_id: &str,
+    from: &str,
+    to: &str,
+    state: &mut BookingState,
+) -> Result<String> {
+    let client = reqwest::Client::new();
+
+    let agent_b_url = std::env::var("AGENT_B_MCP_URL")
+        .unwrap_or_else(|_| "http://localhost:8001".to_string());
+
+    let payment_agent_url = if config.payment_agent_enabled {
+        config.payment_agent_url.as_deref()
+    } else {
+        None
+    };
+
+    let zkfetch_wrapper_url = config.zkfetch_wrapper_url.as_deref();
+
+    println!("[BOOKING] Fetching ticket pricing for {} -> {}", from, to);
+    let price_args = serde_json::json!({
+        "from": from,
+        "to": to
+    });
+    
+    match call_server_tool_with_proof(
+        &client,
+        &config.server_url,
+        &agent_b_url,
+        payment_agent_url,
+        zkfetch_wrapper_url,
+        "get-ticket-price",
+        price_args,
+    )
+    .await
+    {
+        Ok((result, proof)) => {
+            // Collect and submit cryptographic proof if available
+            if let Some(crypto_proof) = proof {
+                state.cryptographic_traces.push(crypto_proof.clone());
+                println!("[PROOF] Collected proof for get-ticket-price: {}", state.cryptographic_traces.len());
+                
+                // Submit proof to agent-a database asynchronously
+                let server_url = config.server_url.clone();
+                let session_id_db = session_id.to_string();
+                let crypto_proof_db = crypto_proof.clone();
+                tokio::spawn(async move {
+                    match submit_proof_to_database(&server_url, &session_id_db, &crypto_proof_db).await {
+                        Ok(proof_id) => {
+                            println!("[PROOF] Submitted proof to agent-a database: {}", proof_id);
+                        }
+                        Err(e) => {
+                            eprintln!("[PROOF] Failed to submit proof to agent-a database: {}", e);
+                        }
+                    }
+                });
+                
+                // Submit proof to zk-attestation-service for independent verification
+                let attestation_url = std::env::var("ATTESTATION_SERVICE_URL")
+                    .unwrap_or_else(|_| "http://localhost:8000".to_string());
+                let session_id_attest = session_id.to_string();
+                let client_attest = reqwest::Client::new();
+                let crypto_proof_attest = crypto_proof.clone();
+                
+                tokio::spawn(async move {
+                    match submit_proof_to_attestation_service(
+                        &client_attest,
+                        &attestation_url,
+                        &session_id_attest,
+                        &crypto_proof_attest
+                    ).await {
+                        Ok(proof_id) => {
+                            println!("[PROOF] ✓ Proof submitted to attestation service for {}: {}", crypto_proof_attest.tool_name, proof_id);
+                        }
+                        Err(e) => {
+                            eprintln!("[PROOF] ✗ Failed to submit proof to attestation service for {}: {}", crypto_proof_attest.tool_name, e);
+                        }
+                    }
+                });
+            }
+            Ok(result)
+        }
+        Err(e) => {
+            eprintln!("[BOOKING] Failed to fetch pricing: {}", e);
+            Err(anyhow!("Failed to fetch pricing: {}", e))
+        }
+    }
+}
+
 /// Complete a flight booking with payment processing
 pub async fn complete_booking_with_payment(
     config: &AgentConfig,
@@ -31,6 +122,7 @@ pub async fn complete_booking_with_payment(
     let zkfetch_wrapper_url = config.zkfetch_wrapper_url.as_deref();
 
     let session_id = session_id.to_string();
+    
     let mut enrollment_token_id = "token_789".to_string();
     let mut enrollment_complete = false;
     
@@ -38,7 +130,7 @@ pub async fn complete_booking_with_payment(
     // Agent-A does NOT send proofId to payment tools.
     // Instead, Payment-Agent queries attestation service with sessionId to find and verify proofs.
 
-    // Step 1: Check if card is already enrolled
+    // Step 1: Check if card is already enrolled (in complete_booking_with_payment)
     if let Some(payment_url) = payment_agent_url {
         let session_url = format!("{}/session/{}", payment_url, session_id);
         
@@ -229,7 +321,7 @@ pub async fn complete_booking_with_payment(
                 
                 // Submit proof to zk-attestation-service for independent verification
                 let attestation_url = std::env::var("ATTESTATION_SERVICE_URL")
-                    .unwrap_or_else(|_| "http://localhost:8001".to_string());
+                    .unwrap_or_else(|_| "http://localhost:8000".to_string());
                 let session_id_attest = session_id.to_string();
                 let client_attest = reqwest::Client::new();
                 let crypto_proof_attest = crypto_proof.clone();
@@ -242,10 +334,10 @@ pub async fn complete_booking_with_payment(
                         &crypto_proof_attest
                     ).await {
                         Ok(proof_id) => {
-                            println!("[PROOF] Submitted proof to attestation service: {}", proof_id);
+                            println!("[PROOF] ✓ Proof submitted to attestation service for {}: {}", crypto_proof_attest.tool_name, proof_id);
                         }
                         Err(e) => {
-                            eprintln!("[PROOF] Failed to submit proof to attestation service: {}", e);
+                            eprintln!("[PROOF] ✗ Failed to submit proof to attestation service for {}: {}", crypto_proof_attest.tool_name, e);
                         }
                     }
                 });
