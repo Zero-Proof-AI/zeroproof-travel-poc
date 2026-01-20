@@ -182,6 +182,8 @@ pub fn parse_tool_calls(claude_response: &str) -> Result<Vec<(String, Value)>> {
         let json_str = &claude_response[start..=end];
         println!("[PARSER] Extracted JSON (length: {}): {}", json_str.len(), 
                  &json_str[..json_str.len().min(200)]);
+        println!("[PARSER] Last 100 chars: {}", 
+                 &json_str[json_str.len().saturating_sub(100)..]);
         
         match serde_json::from_str::<Value>(json_str) {
             Ok(parsed) => {
@@ -210,6 +212,8 @@ pub fn parse_tool_calls(claude_response: &str) -> Result<Vec<(String, Value)>> {
             }
             Err(e) => {
                 println!("[PARSER] ✗ JSON parse error: {}", e);
+                println!("[PARSER] Full extracted JSON for debugging:");
+                println!("{}", json_str);
                 Err(anyhow!("JSON parse error: {}", e))
             }
         }

@@ -113,6 +113,104 @@ pub async fn process_user_query(
 
     let tool_definitions = fetch_all_tools(&client, &config.server_url, &agent_b_url, payment_agent_url).await?;
 
+    // Check if we're in an extraction state - if so, skip tool-based Claude call and go straight to extraction
+    if (state.step == "passenger_name" && state.passenger_name.is_none()) ||
+       (state.step == "passenger_email" && state.passenger_email.is_none()) ||
+       (state.step == "payment_method") {
+        println!("[EXTRACTION MODE] Detected extraction state: '{}' - skipping tool-based Claude call", state.step);
+        
+        let mut updated_messages = messages.to_vec();
+        
+        if state.step == "passenger_name" && state.passenger_name.is_none() {
+            println!("[CONDITION CHECK] ✓ Name condition matched: step='{}' | passenger_name.is_none()={}", 
+                     state.step, state.passenger_name.is_none());
+            let extracted_name = extract_with_claude(&client, config, "passenger_name", user_query, state, &serde_json::json!([])).await?;
+            
+            if !extracted_name.is_empty() {
+                println!("[STATE_TRANSITION] Name extracted: '{}' → state.step now = 'passenger_email'", extracted_name);
+                state.passenger_name = Some(extracted_name.clone());
+                state.step = "passenger_email".to_string();
+                
+                let response = format!(
+                    "Agent A: Perfect! Got it - {}.\n\n📧 Step 2: Email Address\n\nWhat is your email address?",
+                    extracted_name
+                );
+                updated_messages.push(ClaudeMessage {
+                    role: "assistant".to_string(),
+                    content: response.clone(),
+                });
+                return Ok((response, updated_messages, state.clone()));
+            } else {
+                let response = "Agent A: I couldn't understand that. Could you please provide your full name?".to_string();
+                updated_messages.push(ClaudeMessage {
+                    role: "assistant".to_string(),
+                    content: response.clone(),
+                });
+                return Ok((response, updated_messages, state.clone()));
+            }
+        }
+        
+        if state.step == "passenger_email" && state.passenger_email.is_none() {
+            println!("[CONDITION CHECK] ✓ Email condition matched: step='{}' | passenger_email.is_none()={}", 
+                     state.step, state.passenger_email.is_none());
+            let extracted_email = extract_with_claude(&client, config, "passenger_email", user_query, state, &serde_json::json!([])).await?;
+            
+            if !extracted_email.is_empty() {
+                println!("[STATE_TRANSITION] Email extracted: '{}' → state.step now = 'payment_method'", extracted_email);
+                state.passenger_email = Some(extracted_email.clone());
+                state.step = "payment_method".to_string();
+                let passenger_name = state.passenger_name.clone().unwrap_or_default();
+                
+                let response = format!(
+                    "Agent A: Excellent! I have your details:\n- Name: {}\n- Email: {}\n\n💳 Step 3: Payment Method\n\nHow would you like to pay for this ${} flight?\n1. Visa Credit Card\n2. Other payment method\n\nPlease reply with 1 or 2.",
+                    passenger_name, extracted_email, state.price as i32
+                );
+                updated_messages.push(ClaudeMessage {
+                    role: "assistant".to_string(),
+                    content: response.clone(),
+                });
+                return Ok((response, updated_messages, state.clone()));
+            } else {
+                let response = "Agent A: I couldn't find a valid email. Please provide your email address (e.g., user@example.com):".to_string();
+                updated_messages.push(ClaudeMessage {
+                    role: "assistant".to_string(),
+                    content: response.clone(),
+                });
+                return Ok((response, updated_messages, state.clone()));
+            }
+        }
+        
+        if state.step == "payment_method" {
+            println!("[CONDITION CHECK] ✓ Payment method condition matched: step='{}'", state.step);
+            let payment_method = extract_with_claude(&client, config, "payment_method", user_query, state, &serde_json::json!([])).await?;
+            println!("[DEBUG] Extracted payment_method: '{}' (empty: {})", payment_method, payment_method.is_empty());
+            
+            // Check if extraction returned empty
+            if payment_method.is_empty() {
+                let response = "Agent A: I need you to select your payment method. Please reply with:\n1. Visa Credit Card\n2. Other payment method".to_string();
+                updated_messages.push(ClaudeMessage {
+                    role: "assistant".to_string(),
+                    content: response.clone(),
+                });
+                return Ok((response, updated_messages, state.clone()));
+            }
+            
+            // Payment method already extracted and converted by extract_with_claude
+            state.step = "enrollment_confirmation".to_string();
+            state.payment_method = Some(payment_method.clone());
+            
+            let response = format!(
+                "Agent A: Perfect! You've selected {} for this transaction.\n\n🔐 Step 4: Biometric Authentication\n\nTo complete this booking, I'll need to enroll your payment card with biometric authentication.\n\nReady to proceed with payment enrollment? (Yes/No)",
+                payment_method
+            );
+            updated_messages.push(ClaudeMessage {
+                role: "assistant".to_string(),
+                content: response.clone(),
+            });
+            return Ok((response, updated_messages, state.clone()));
+        }
+    }
+
     // Call Claude with full message history
     let claude_response = call_claude(&client, config, user_query, messages, state, &tool_definitions, None).await?;
     // Build updated message list
@@ -132,104 +230,6 @@ pub async fn process_user_query(
                     role: "assistant".to_string(),
                     content: claude_response.clone(),
                 });
-                
-                // Extract name and email using Claude's understanding
-                // User provided name, now ask for email
-                if state.step == "passenger_name" && state.passenger_name.is_none() {
-                    println!("[DEBUG] Processing passenger_name step");
-                    let extracted_name = extract_with_claude(&client, config, "passenger_name", user_query, state, &tool_definitions).await?;
-                    println!("[DEBUG] Extracted name result: '{}' (empty: {})", extracted_name, extracted_name.is_empty());
-                    
-                    if !extracted_name.is_empty() {
-                        state.passenger_name = Some(extracted_name.clone());
-                        state.step = "passenger_email".to_string();
-                        println!("[DEBUG] State updated to: {}", state.step);
-                        let response = format!(
-                            "Agent A: Perfect! Got it - {}.\n\n📧 Step 2: Email Address\n\nWhat is your email address?",
-                            extracted_name
-                        );
-                        updated_messages.push(ClaudeMessage {
-                            role: "assistant".to_string(),
-                            content: response.clone(),
-                        });
-                        return Ok((response, updated_messages, state.clone()));
-                    } else {
-                        // Couldn't extract name, ask again
-                        let response = "Agent A: I couldn't understand that. Could you please provide your full name?".to_string();
-                        updated_messages.push(ClaudeMessage {
-                            role: "assistant".to_string(),
-                            content: response.clone(),
-                        });
-                        return Ok((response, updated_messages, state.clone()));
-                    }
-                }
-                
-                // User provided email, now ask for payment method
-                if state.step == "passenger_email" && state.passenger_email.is_none() {
-                    let extracted_email = extract_with_claude(&client, config, "passenger_email", user_query, state, &tool_definitions).await?;
-                    
-                    if !extracted_email.is_empty() {
-                        state.passenger_email = Some(extracted_email.clone());
-                        state.step = "payment_method".to_string();
-                        let passenger_name = state.passenger_name.clone().unwrap_or_default();
-                        
-                        let response = format!(
-                            "Agent A: Excellent! I have your details:\n- Name: {}\n- Email: {}\n\n💳 Step 3: Payment Method\n\nHow would you like to pay for this ${} flight?\n1. Visa Credit Card\n2. Other payment method\n\nPlease reply with 1 or 2.",
-                            passenger_name, extracted_email, state.price as i32
-                        );
-                        updated_messages.push(ClaudeMessage {
-                            role: "assistant".to_string(),
-                            content: response.clone(),
-                        });
-                        return Ok((response, updated_messages, state.clone()));
-                    } else {
-                        // Couldn't extract email, ask again
-                        let response = "Agent A: I couldn't find a valid email. Please provide your email address (e.g., user@example.com):".to_string();
-                        updated_messages.push(ClaudeMessage {
-                            role: "assistant".to_string(),
-                            content: response.clone(),
-                        });
-                        return Ok((response, updated_messages, state.clone()));
-                    }
-                }
-                
-                // User selected payment method. Ask for enrollment confirmation.
-                if state.step == "payment_method" {
-                    let payment_method = extract_with_claude(&client, config, "payment_method", user_query, state, &tool_definitions).await?;
-                    
-                    // Check if user actually responded to payment method question
-                    if !payment_method.contains("1") && !payment_method.contains("2") 
-                        && !payment_method.contains("visa") && !payment_method.contains("other")
-                        && !payment_method.contains("credit") && !payment_method.contains("card") {
-                        // User didn't answer the payment method question clearly
-                        let response = "Agent A: I need you to select your payment method. Please reply with:\n1. Visa Credit Card\n2. Other payment method".to_string();
-                        updated_messages.push(ClaudeMessage {
-                            role: "assistant".to_string(),
-                            content: response.clone(),
-                        });
-                        return Ok((response, updated_messages, state.clone()));
-                    }
-                    
-                    let selected_method = if payment_method.contains("1") || payment_method.contains("visa") {
-                        "Visa Credit Card"
-                    } else {
-                        "Visa Credit Card" // Default to Visa if other selected
-                    };
-                    
-                    // Update state with payment method
-                    state.step = "enrollment_confirmation".to_string();
-                    state.payment_method = Some(selected_method.to_string());
-                    
-                    let response = format!(
-                        "Agent A: Perfect! You've selected {} for this transaction.\n\n🔐 Step 4: Biometric Authentication\n\nTo complete this booking, I'll need to enroll your payment card with biometric authentication.\n\nReady to proceed with payment enrollment? (Yes/No)",
-                        selected_method
-                    );
-                    updated_messages.push(ClaudeMessage {
-                        role: "assistant".to_string(),
-                        content: response.clone(),
-                    });
-                    return Ok((response, updated_messages, state.clone()));
-                }
                 
                 Ok((format!("Agent A: {}", claude_response), updated_messages, state.clone()))
             } else {
@@ -287,7 +287,7 @@ pub async fn process_user_query(
                                         
                                         // Submit proof to zk-attestation-service for independent verification
                                         let attestation_url = std::env::var("ATTESTATION_SERVICE_URL")
-                                            .unwrap_or_else(|_| "http://localhost:8001".to_string());
+                                            .unwrap_or_else(|_| "http://localhost:8000".to_string());
                                         let session_id_attest = session_id.to_string();
                                         let client_attest = reqwest::Client::new();
                                         let crypto_proof_attest = crypto_proof.clone();
@@ -306,7 +306,8 @@ pub async fn process_user_query(
                                                     println!("[PROOF] Submitted proof to attestation service: {}", proof_id);
                                                 }
                                                 Err(e) => {
-                                                    eprintln!("[PROOF] Failed to submit proof to attestation service: {}", e);
+                                                    eprintln!("[PROOF] ✗ Failed to submit proof to attestation service: {}", e);
+                                                    eprintln!("[PROOF] Please check if attestation service is running and accessible");
                                                 }
                                             }
                                         });
@@ -337,7 +338,7 @@ pub async fn process_user_query(
 
                     if let Some(_pricing) = pricing_result {
                         // Update state with pricing information
-                        state.step = "pricing".to_string();
+                        state.step = "passenger_name".to_string();
                         state.from = from.clone();
                         state.to = to.clone();
                         state.price = price;
@@ -368,45 +369,45 @@ pub async fn process_user_query(
 
                     if is_booking_with_payment {
                         // Payment method selection and enrollment
-                        // let payment_method = user_query.trim().to_lowercase();
+                        let payment_method = user_query.trim().to_lowercase();
                         
                         // // User selected payment method. Ask for enrollment confirmation.
-                        // if state.step == "payment_method" {
-                        //     // Check if user actually responded to payment method question
-                        //     if !payment_method.contains("1") && !payment_method.contains("2") 
-                        //         && !payment_method.contains("visa") && !payment_method.contains("other")
-                        //         && !payment_method.contains("credit") && !payment_method.contains("card") {
-                        //         // User didn't answer the payment method question clearly
-                        //         let response = "Agent A: I need you to select your payment method. Please reply with:\n1. Visa Credit Card\n2. Other payment method".to_string();
-                        //         updated_messages.push(ClaudeMessage {
-                        //             role: "assistant".to_string(),
-                        //             content: response.clone(),
-                        //         });
-                        //         return Ok((response, updated_messages, state.clone()));
-                        //     }
+                        if state.step == "payment_method" {
+                            // Check if user actually responded to payment method question
+                            if !payment_method.contains("1") && !payment_method.contains("2") 
+                                && !payment_method.contains("visa") && !payment_method.contains("other")
+                                && !payment_method.contains("credit") && !payment_method.contains("card") {
+                                // User didn't answer the payment method question clearly
+                                let response = "Agent A: I need you to select your payment method. Please reply with:\n1. Visa Credit Card\n2. Other payment method".to_string();
+                                updated_messages.push(ClaudeMessage {
+                                    role: "assistant".to_string(),
+                                    content: response.clone(),
+                                });
+                                return Ok((response, updated_messages, state.clone()));
+                            }
                             
-                        //     let selected_method = if payment_method.contains("1") || payment_method.contains("visa") {
-                        //         "Visa Credit Card"
-                        //     } else {
-                        //         "Visa Credit Card" // Default to Visa if other selected
-                        //     };
+                            let selected_method = if payment_method.contains("1") || payment_method.contains("visa") {
+                                "Visa Credit Card"
+                            } else {
+                                "Visa Credit Card" // Default to Visa if other selected
+                            };
                             
-                        //     // Update state with payment method
-                        //     state.step = "enrollment_confirmation".to_string();
-                        //     state.payment_method = Some(selected_method.to_string());
+                            // Update state with payment method
+                            state.step = "enrollment_confirmation".to_string();
+                            state.payment_method = Some(selected_method.to_string());
                             
-                        //     let response = format!(
-                        //         "Agent A: Perfect! You've selected {} for this transaction.\n\n🔐 Step 4: Biometric Authentication\n\nTo complete this booking, I'll need to enroll your payment card with biometric authentication.\n\nReady to proceed with payment enrollment? (Yes/No)",
-                        //         selected_method
-                        //     );
-                        //     updated_messages.push(ClaudeMessage {
-                        //         role: "assistant".to_string(),
-                        //         content: response.clone(),
-                        //     });
-                        //     return Ok((response, updated_messages, state.clone()));
-                        // }
+                            let response = format!(
+                                "Agent A: Perfect! You've selected {} for this transaction.\n\n🔐 Step 4: Biometric Authentication\n\nTo complete this booking, I'll need to enroll your payment card with biometric authentication.\n\nReady to proceed with payment enrollment? (Yes/No)",
+                                selected_method
+                            );
+                            updated_messages.push(ClaudeMessage {
+                                role: "assistant".to_string(),
+                                content: response.clone(),
+                            });
+                            return Ok((response, updated_messages, state.clone()));
+                        }
                         
-                        // User confirmed enrollment. Now proceed with full payment (Turn 6)
+                        
                         if state.step == "enrollment_confirmation" {
                             // First check if user is responding to the enrollment confirmation prompt
                             let response_lower = user_query.trim().to_lowercase();

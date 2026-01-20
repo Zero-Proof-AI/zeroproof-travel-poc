@@ -71,15 +71,35 @@ pub async fn submit_proof_to_attestation_service(
         "redaction_metadata": proof.redaction_metadata,
     });
     
-    let response = client
+    let response = match client
         .post(&submit_url)
         .json(&payload)
         .send()
-        .await?;
+        .await
+    {
+        Ok(resp) => resp,
+        Err(e) => {
+            eprintln!("[PROOF] Error sending request to {}: {:?}", submit_url, e);
+            eprintln!("[PROOF] Error details: {}", e.to_string());
+            if let Some(status) = e.status() {
+                eprintln!("[PROOF] HTTP Status: {}", status);
+            }
+            if e.is_connect() {
+                eprintln!("[PROOF] Connection error - is the attestation service running at {}?", attestation_service_url);
+            }
+            if e.is_timeout() {
+                eprintln!("[PROOF] Request timeout");
+            }
+            return Err(anyhow!("Failed to send request to attestation service: {}", e));
+        }
+    };
     
     if !response.status().is_success() {
-        let error_text = response.text().await?;
-        return Err(anyhow!("Failed to submit proof: {}", error_text));
+        let status = response.status();
+        let error_text = response.text().await.unwrap_or_else(|_| "<could not read response body>".to_string());
+        eprintln!("[PROOF] Attestation service returned error status: {}", status);
+        eprintln!("[PROOF] Response body: {}", error_text);
+        return Err(anyhow!("Failed to submit proof: HTTP {} - {}", status, error_text));
     }
     
     let result: Value = response.json().await?;

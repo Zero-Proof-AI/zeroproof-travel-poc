@@ -31,7 +31,10 @@ pub fn get_passenger_email_extraction_prompt(user_input: &str) -> String {
 pub fn get_payment_method_extraction_prompt(user_input: &str) -> String {
     format!(
         "Extract the payment method from this user input: \"{}\"\n\n\
-         Respond with ONLY the payment method (e.g., 'Visa Credit Card', 'Other'), nothing else. \
+         User may respond with:\n\
+         - '1' or 'Visa' or 'Visa Credit Card' → respond with 'Visa Credit Card'\n\
+         - '2' or 'Other' → respond with 'Other'\n\n\
+         Respond with ONLY the payment method name, nothing else. \
          If no payment method is provided, respond with: NONE",
         user_input
     )
@@ -63,15 +66,50 @@ pub async fn extract_with_claude(
         _tool_definitions,
         Some(EXTRACTION_SYSTEM_PROMPT),
     ).await.unwrap_or_default();
-    println!("[DEBUG] Claude response for {}: '{}'", field, claude_response);
+    println!("[DEBUG] Claude response for {}: '{}' (length: {})", field, claude_response, claude_response.len());
 
     let trimmed = claude_response.trim();
-    println!("[DEBUG] Trimmed response: '{}'", trimmed);
+    println!("[DEBUG] Trimmed response: '{}' (length: {})", trimmed, trimmed.len());
+    
     if trimmed.to_uppercase() == "NONE" || trimmed.is_empty() {
         println!("[DEBUG] Returning empty string for {}", field);
         Ok(String::new())
     } else {
+        // Additional validation for email
+        if field == "passenger_email" {
+            let email_trimmed = trimmed
+                .to_lowercase()
+                .trim()
+                .trim_matches(|c| c == '"' || c == '\'' || c == '*' || c == '_')
+                .to_string();
+            
+            // Basic email validation
+            if email_trimmed.contains('@') && email_trimmed.contains('.') {
+                println!("[DEBUG] Valid email extracted for {}: '{}'", field, email_trimmed);
+                return Ok(email_trimmed);
+            } else {
+                println!("[DEBUG] Invalid email format: '{}' - returning empty", email_trimmed);
+                return Ok(String::new());
+            }
+        }
+        
         println!("[DEBUG] Returning extracted {}: '{}'", field, trimmed);
+        
+        // Additional validation for payment_method
+        if field == "payment_method" {
+            let payment_lower = trimmed.to_lowercase();
+            // Convert numbered responses to payment method names
+            if payment_lower.contains('1') || payment_lower.contains("visa") || payment_lower.contains("credit") {
+                return Ok("Visa Credit Card".to_string());
+            } else if payment_lower.contains('2') || payment_lower.contains("other") {
+                return Ok("Other".to_string());
+            }
+            // If we got a clear response, return it
+            if trimmed != "NONE" && !trimmed.is_empty() {
+                return Ok(trimmed.to_string());
+            }
+        }
+        
         Ok(trimmed.to_string())
     }
 }
