@@ -271,13 +271,29 @@ async fn handle_websocket(socket: WebSocket, sessions: SessionManager) {
     tokio::spawn(async move {
         let mut progress_rx = progress_rx;
         while let Some(progress_msg) = progress_rx.recv().await {
-            let progress_json = serde_json::json!({
-                "progress": progress_msg,
-                "session_id": session_id_clone
-            });
-            if let Err(e) = sender_clone.lock().await.send(Message::Text(progress_json.to_string())).await {
-                println!("[WEBSOCKET] Error sending progress: {}", e);
-                break;
+            // Check if this is a special proof message (marked with __PROOF__)
+            if progress_msg.starts_with("__PROOF__") {
+                // Extract the JSON from the message and send as proofs array
+                if let Ok(proof_json) = serde_json::from_str::<serde_json::Value>(&progress_msg[9..]) {
+                    let proofs_msg = serde_json::json!({
+                        "proofs": [proof_json],
+                        "session_id": session_id_clone
+                    });
+                    if let Err(e) = sender_clone.lock().await.send(Message::Text(proofs_msg.to_string())).await {
+                        println!("[WEBSOCKET] Error sending proof: {}", e);
+                        break;
+                    }
+                }
+            } else {
+                // Regular progress message
+                let progress_json = serde_json::json!({
+                    "progress": progress_msg,
+                    "session_id": session_id_clone
+                });
+                if let Err(e) = sender_clone.lock().await.send(Message::Text(progress_json.to_string())).await {
+                    println!("[WEBSOCKET] Error sending progress: {}", e);
+                    break;
+                }
             }
         }
     });
@@ -328,6 +344,7 @@ async fn handle_websocket(socket: WebSocket, sessions: SessionManager) {
                                          session_id_for_processing, updated_state.step, message_count);
                                 
                                 // Send response back through WebSocket
+                                // Note: Proofs are sent in real-time via progress channel as they're submitted
                                 let response_msg = serde_json::json!({
                                     "success": true,
                                     "response": response,

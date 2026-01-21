@@ -4,7 +4,7 @@
 use anyhow::{Result, anyhow};
 use serde_json::{json, Value};
 use crate::orchestration::{AgentConfig, BookingState};
-use crate::shared::{call_server_tool_with_proof, submit_proof_to_database};
+use crate::shared::{call_server_tool_with_proof, submit_proof_to_database_with_progress};
 use crate::payment::{enroll_card_if_needed, initiate_payment, retrieve_payment_credentials};
 
 /// Fetch ticket pricing with proof collection
@@ -14,6 +14,7 @@ pub async fn get_ticket_pricing(
     from: &str,
     to: &str,
     state: &mut BookingState,
+    progress_tx: Option<tokio::sync::mpsc::Sender<String>>,
 ) -> Result<String> {
     let client = reqwest::Client::new();
 
@@ -51,13 +52,13 @@ pub async fn get_ticket_pricing(
                 state.cryptographic_traces.push(crypto_proof.clone());
                 println!("[PROOF] Collected proof for get-ticket-price: {}", state.cryptographic_traces.len());
                 
-                // Submit proof to agent-a database asynchronously
-                // Note: agent-a database handles forwarding to attestation service
+                // Submit proof to agent-a database asynchronously with progress channel
                 let server_url = config.server_url.clone();
                 let session_id_db = session_id.to_string();
                 let crypto_proof_db = crypto_proof.clone();
+                let progress_tx_db = progress_tx.clone();
                 tokio::spawn(async move {
-                    match submit_proof_to_database(&server_url, &session_id_db, &crypto_proof_db).await {
+                    match submit_proof_to_database_with_progress(&server_url, &session_id_db, &crypto_proof_db, None, None, None, progress_tx_db).await {
                         Ok(proof_id) => {
                             println!("[PROOF] Submitted proof to agent-a database: {}", proof_id);
                         }
@@ -121,6 +122,7 @@ pub async fn complete_booking_with_payment(
         &session_id,
         payment_agent_url,
         state,
+        progress_tx.clone(),
     ).await {
         Ok((token_id, complete)) => {
             println!("[PAYMENT] Card enrollment complete: {} (token: {})", complete, token_id);
@@ -199,13 +201,13 @@ pub async fn complete_booking_with_payment(
                 state.cryptographic_traces.push(crypto_proof.clone());
                 println!("[PROOF] Collected proof for book-flight: {}", state.cryptographic_traces.len());
                 
-                // Submit proof to agent-a database asynchronously
-                // Note: agent-a database handles forwarding to attestation service
+                // Submit proof to agent-a database asynchronously with progress channel
                 let server_url = config.server_url.clone();
                 let session_id_db = session_id.to_string();
                 let crypto_proof_db = crypto_proof.clone();
+                let progress_tx_db = progress_tx.clone();
                 tokio::spawn(async move {
-                    match submit_proof_to_database(&server_url, &session_id_db, &crypto_proof_db).await {
+                    match submit_proof_to_database_with_progress(&server_url, &session_id_db, &crypto_proof_db, None, None, None, progress_tx_db).await {
                         Ok(proof_id) => {
                             println!("[PROOF] Submitted proof to agent-a database: {}", proof_id);
                         }

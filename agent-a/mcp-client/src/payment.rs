@@ -4,7 +4,7 @@
 use anyhow::{Result, anyhow};
 use serde_json::{json, Value};
 use crate::orchestration::{AgentConfig, BookingState};
-use crate::shared::{call_server_tool, call_server_tool_with_proof, submit_proof_to_database};
+use crate::shared::{call_server_tool, call_server_tool_with_proof, submit_proof_to_database_with_progress};
 use regex::Regex;
 
 /// Parse and verify enroll-card response
@@ -53,6 +53,7 @@ pub async fn enroll_card_if_needed(
     session_id: &str,
     payment_agent_url: Option<&str>,
     state: &mut BookingState,
+    progress_tx: Option<tokio::sync::mpsc::Sender<String>>,
 ) -> Result<(String, bool)> {
     let client = reqwest::Client::new();
 
@@ -116,12 +117,13 @@ pub async fn enroll_card_if_needed(
                     state.cryptographic_traces.push(crypto_proof.clone());
                     println!("[PROOF] Collected proof for enroll-card: {}", state.cryptographic_traces.len());
                     
-                    // Submit proof to agent-a database asynchronously
+                    // Submit proof to agent-a database asynchronously with progress channel
                     let server_url = config.server_url.clone();
                     let session_id_db = session_id.to_string();
                     let crypto_proof_db = crypto_proof.clone();
+                    let progress_tx_db = progress_tx.clone();
                     tokio::spawn(async move {
-                        match submit_proof_to_database(&server_url, &session_id_db, &crypto_proof_db).await {
+                        match submit_proof_to_database_with_progress(&server_url, &session_id_db, &crypto_proof_db, None, None, None, progress_tx_db).await {
                             Ok(proof_id) => {
                                 println!("[PROOF] Submitted proof to agent-a database: {}", proof_id);
                             }

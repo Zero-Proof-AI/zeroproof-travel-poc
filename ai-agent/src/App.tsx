@@ -112,6 +112,13 @@ const ChatInterface: React.FC = () => {
           setSessionId(data.session_id);
         }
 
+        // Handle proof messages injected from backend
+        if (data.proofs && Array.isArray(data.proofs)) {
+          console.log('[WEBSOCKET] Proofs received:', data.proofs.length, 'proofs');
+          // Append new proofs to existing ones instead of replacing
+          setProofs(prevProofs => [...prevProofs, ...data.proofs]);
+        }
+
         // Handle progress messages (real-time updates) - display them immediately
         if (data.progress && !data.response) {
           console.log('[WEBSOCKET] Progress update:', data.progress);
@@ -173,13 +180,13 @@ const ChatInterface: React.FC = () => {
           progressMessagesRef.current = []; // Reset progress messages
           setLoading(false);
           
-          // Fetch proofs after agent responds
-          console.log('[WEBSOCKET] Agent responded, triggering proof fetch for session:', data.session_id);
-          setTimeout(() => {
-            if (data.session_id) {
-              fetchProofsWithSession(data.session_id);
-            }
-          }, 500);
+          // Fetch proofs after agent responds - reserved for later, need to fetch proofs from attester
+          // console.log('[WEBSOCKET] Agent responded, triggering proof fetch for session:', data.session_id);
+          // setTimeout(() => {
+          //   if (data.session_id) {
+          //     fetchProofsWithSession(data.session_id);
+          //   }
+          // }, 500);
         } else if (data.error) {
           console.error('[WEBSOCKET] Error from server:', data.error);
           
@@ -247,71 +254,71 @@ const ChatInterface: React.FC = () => {
   }, []);
 
   // Fetch proofs automatically (for polling) - no loading state to avoid blinking
-  const fetchProofsAutomatically = useCallback(async () => {
-    if (!sessionId) {
-      console.log('[PROOFS] Skipping fetch - no sessionId');
-      return;
-    }
+  // const fetchProofsAutomatically = useCallback(async () => {
+  //   if (!sessionId) {
+  //     console.log('[PROOFS] Skipping fetch - no sessionId');
+  //     return;
+  //   }
     
-    console.log('[PROOFS] Fetching proofs for sessionId:', sessionId);
-    try {
-      const response = await axios.get(`${proofsApiUrl}/${sessionId}`);
-      if (response.data.success) {
-        // Only update if proofs actually changed
-        setProofs((prevProofs) => {
-          const newProofs = response.data.proofs;
+  //   console.log('[PROOFS] Fetching proofs for sessionId:', sessionId);
+  //   try {
+  //     const response = await axios.get(`${proofsApiUrl}/${sessionId}`);
+  //     if (response.data.success) {
+  //       // Only update if proofs actually changed
+  //       setProofs((prevProofs) => {
+  //         const newProofs = response.data.proofs;
           
-          // Quick check: if count is the same, likely no changes
-          if (prevProofs.length === newProofs.length && prevProofs.length > 0) {
-            // For same-length arrays, compare only the first and last items to detect changes
-            const firstChanged = JSON.stringify(prevProofs[0]) !== JSON.stringify(newProofs[0]);
-            const lastChanged = JSON.stringify(prevProofs[prevProofs.length - 1]) !== JSON.stringify(newProofs[newProofs.length - 1]);
+  //         // Quick check: if count is the same, likely no changes
+  //         if (prevProofs.length === newProofs.length && prevProofs.length > 0) {
+  //           // For same-length arrays, compare only the first and last items to detect changes
+  //           const firstChanged = JSON.stringify(prevProofs[0]) !== JSON.stringify(newProofs[0]);
+  //           const lastChanged = JSON.stringify(prevProofs[prevProofs.length - 1]) !== JSON.stringify(newProofs[newProofs.length - 1]);
             
-            if (!firstChanged && !lastChanged) {
-              console.log('[PROOFS] No changes detected - skipping update');
-              return prevProofs;
-            }
-          }
+  //           if (!firstChanged && !lastChanged) {
+  //             console.log('[PROOFS] No changes detected - skipping update');
+  //             return prevProofs;
+  //           }
+  //         }
           
-          console.log('[PROOFS] State updated - proof count:', prevProofs.length, '->', newProofs.length);
-          return newProofs;
-        });
-      }
-    } catch (error) {
-      console.error('Error fetching proofs:', error);
-    }
-  }, [sessionId, proofsApiUrl]);
+  //         console.log('[PROOFS] State updated - proof count:', prevProofs.length, '->', newProofs.length);
+  //         return newProofs;
+  //       });
+  //     }
+  //   } catch (error) {
+  //     console.error('Error fetching proofs:', error);
+  //   }
+  // }, [sessionId, proofsApiUrl]);
 
-  // Fetch proofs with specific session ID (for immediate use after WebSocket message)
-  const fetchProofsWithSession = useCallback(async (targetSessionId: string) => {
-    console.log('[PROOFS] Fetching proofs for specific sessionId:', targetSessionId);
-    try {
-      const response = await axios.get(`${proofsApiUrl}/${targetSessionId}`);
-      if (response.data.success) {
-        setProofs(response.data.proofs);
-        console.log('[PROOFS] Fetched and set proofs:', response.data.proofs.length);
-      }
-    } catch (error) {
-      console.error('Error fetching proofs:', error);
-    }
-  }, [proofsApiUrl]);
+  // // Fetch proofs with specific session ID (for immediate use after WebSocket message)
+  // const fetchProofsWithSession = useCallback(async (targetSessionId: string) => {
+  //   console.log('[PROOFS] Fetching proofs for specific sessionId:', targetSessionId);
+  //   try {
+  //     const response = await axios.get(`${proofsApiUrl}/${targetSessionId}`);
+  //     if (response.data.success) {
+  //       setProofs(response.data.proofs);
+  //       console.log('[PROOFS] Fetched and set proofs:', response.data.proofs.length);
+  //     }
+  //   } catch (error) {
+  //     console.error('Error fetching proofs:', error);
+  //   }
+  // }, [proofsApiUrl]);
 
-  // Fetch proofs manually (for manual refresh button) - shows loading state
-  const fetchProofs = useCallback(async () => {
-    if (!sessionId) return;
+  // // Fetch proofs manually (for manual refresh button) - shows loading state
+  // const fetchProofs = useCallback(async () => {
+  //   if (!sessionId) return;
     
-    setProofLoading(true);
-    try {
-      const response = await axios.get(`${proofsApiUrl}/${sessionId}`);
-      if (response.data.success) {
-        setProofs(response.data.proofs);
-      }
-    } catch (error) {
-      console.error('Error fetching proofs:', error);
-    } finally {
-      setProofLoading(false);
-    }
-  }, [sessionId, proofsApiUrl]);
+  //   setProofLoading(true);
+  //   try {
+  //     const response = await axios.get(`${proofsApiUrl}/${sessionId}`);
+  //     if (response.data.success) {
+  //       setProofs(response.data.proofs);
+  //     }
+  //   } catch (error) {
+  //     console.error('Error fetching proofs:', error);
+  //   } finally {
+  //     setProofLoading(false);
+  //   }
+  // }, [sessionId, proofsApiUrl]);
 
   // Fetch full proof for modal display
   const fetchFullProof = useCallback(async (proofId: string) => {
@@ -331,12 +338,12 @@ const ChatInterface: React.FC = () => {
   }, [verifyProofUrl]);
 
   // Poll for proofs every 2 seconds when showing proofs (using automatic fetch, no loading state)
-  React.useEffect(() => {
-    if (!showProofs) return;
+  // React.useEffect(() => {
+  //   if (!showProofs) return;
 
-    const interval = setInterval(fetchProofsAutomatically, 5000);
-    return () => clearInterval(interval);
-  }, [showProofs, fetchProofsAutomatically]);
+  //   const interval = setInterval(fetchProofsAutomatically, 5000);
+  //   return () => clearInterval(interval);
+  // }, [showProofs, fetchProofsAutomatically]);
 
   const handleSendMessage = async () => {
     if (!input.trim()) return;
@@ -836,21 +843,15 @@ const ChatInterface: React.FC = () => {
             {showProofs ? '🔐 Hide' : '🔐 Show'} Proofs ({proofs.length})
           </button>
           {showProofs && (
-            <button
-              onClick={fetchProofs}
-              disabled={proofLoading}
+            <span
               style={{
-                padding: '0.5rem 1rem',
-                background: proofLoading ? '#cbd5e0' : '#667eea',
-                color: '#fff',
-                border: 'none',
-                borderRadius: '0.25rem',
-                cursor: proofLoading ? 'not-allowed' : 'pointer',
                 fontSize: '0.9rem',
+                color: '#666',
+                fontStyle: 'italic',
               }}
             >
-              {proofLoading ? '⏳' : '🔄'} Refresh
-            </button>
+              (Live via WebSocket)
+            </span>
           )}
         </div>
       </header>

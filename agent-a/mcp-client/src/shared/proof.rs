@@ -53,6 +53,7 @@ pub async fn submit_proof_to_attestation_service(
     attestation_service_url: &str,
     session_id: &str,
     proof: &CryptographicProof,
+    progress_tx: Option<tokio::sync::mpsc::Sender<String>>,
 ) -> Result<String> {
     let submit_url = format!("{}/proofs/submit", attestation_service_url);
     
@@ -106,6 +107,20 @@ pub async fn submit_proof_to_attestation_service(
     
     if let Some(proof_id) = result.get("proof_id").and_then(|p| p.as_str()) {
         println!("[PROOF] ✓ Proof submitted to attestation service: {}", proof_id);
+        
+        // Send proof to UI via WebSocket if progress channel is available
+        if let Some(tx) = progress_tx {
+            let proof_msg = json!({
+                "tool_name": proof.tool_name,
+                "proof_id": proof_id,
+                "timestamp": proof.timestamp,
+                "verified": proof.verified,
+                "onchain_compatible": proof.onchain_compatible,
+            });
+            let _ = tx.send(format!("__PROOF__{}", proof_msg.to_string())).await;
+            println!("[PROOF] ✓ Proof sent to UI via WebSocket");
+        }
+        
         Ok(proof_id.to_string())
     } else {
         Err(anyhow!("No proof_id in response from attestation service"))
@@ -118,24 +133,26 @@ pub async fn submit_proof_to_database(
     session_id: &str,
     proof: &CryptographicProof,
 ) -> Result<String> {
-    submit_proof_to_database_with_metadata(
+    submit_proof_to_database_with_progress(
         server_url,
         session_id,
         proof,
         None,  // sequence - will be auto-assigned by database
         None,  // related_proof_id
         None,  // workflow_stage - will be inferred from tool_name
+        None,  // progress_tx
     ).await
 }
 
-/// Submit a proof with full workflow metadata
-pub async fn submit_proof_to_database_with_metadata(
+/// Submit a proof with full workflow metadata and optional progress channel
+pub async fn submit_proof_to_database_with_progress(
     server_url: &str,
     session_id: &str,
     proof: &CryptographicProof,
     sequence: Option<u32>,
     related_proof_id: Option<String>,
     workflow_stage: Option<String>,
+    progress_tx: Option<tokio::sync::mpsc::Sender<String>>,
 ) -> Result<String> {
     let client = reqwest::Client::new();
     let url = format!("{}/proofs", server_url);
@@ -189,6 +206,21 @@ pub async fn submit_proof_to_database_with_metadata(
     let result: Value = response.json().await?;
     
     if let Some(proof_id) = result.get("proof_id").and_then(|p| p.as_str()) {
+        println!("[PROOF] ✓ Proof submitted to database: {}", proof_id);
+        
+        // Send proof to UI via WebSocket if progress channel is available
+        if let Some(tx) = progress_tx {
+            let proof_msg = json!({
+                "tool_name": proof.tool_name,
+                "proof_id": proof_id,
+                "timestamp": proof.timestamp,
+                "verified": proof.verified,
+                "onchain_compatible": proof.onchain_compatible,
+            });
+            let _ = tx.send(format!("__PROOF__{}", proof_msg.to_string())).await;
+            println!("[PROOF] ✓ Proof sent to UI via WebSocket");
+        }
+        
         Ok(proof_id.to_string())
     } else {
         Err(anyhow!("Invalid proof submission response"))

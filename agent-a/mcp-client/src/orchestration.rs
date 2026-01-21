@@ -7,7 +7,7 @@
 
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 use crate::shared::{fetch_all_tools, parse_tool_calls, call_claude, call_server_tool, CryptographicProof};
 use crate::prompts::extract_with_claude;
 use crate::booking::{complete_booking_with_payment, get_ticket_pricing};
@@ -87,6 +87,9 @@ impl AgentConfig {
     }
 }
 
+// Note: Proofs are now delivered in real-time via progress channel in submit_proof_to_database_with_progress()
+// No need for batch fetching at the end of operations
+
 /// Process a user query through the full orchestration pipeline
 /// Handles multi-turn conversations including booking workflows
 /// Returns (response_text, updated_messages, updated_state)
@@ -118,8 +121,6 @@ pub async fn process_user_query(
     } else {
         None
     };
-    
-    let zkfetch_wrapper_url = config.zkfetch_wrapper_url.as_deref();
 
     let tool_definitions = fetch_all_tools(&client, &config.server_url, &agent_b_url, payment_agent_url).await?;
 
@@ -263,9 +264,9 @@ pub async fn process_user_query(
                             send_progress(&progress_tx, &format!("🔍 Fetching pricing for {} → {}", from, to)).await;
                             
                             // Call get_ticket_pricing to fetch pricing and collect proof
-                            match get_ticket_pricing(&config, &session_id, from, to, state).await {
+                            match get_ticket_pricing(&config, &session_id, from, to, state, progress_tx.clone()).await {
                                 Ok(pricing_result) => {
-                                    send_progress(&progress_tx, "💰 Pricing received").await;
+                                    // send_progress(&progress_tx, "💰 Pricing received").await;
                                     println!("[PRICING] Fetched: {}", pricing_result);
                                     
                                     // Parse pricing result to extract price
@@ -401,6 +402,7 @@ pub async fn process_user_query(
                             {
                                 Ok(result) => {
                                     send_progress(&progress_tx, "✅ Booking completed successfully").await;
+                                    
                                     state.step = "completed".to_string();
                                     updated_messages.push(ClaudeMessage {
                                         role: "assistant".to_string(),
