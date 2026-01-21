@@ -348,11 +348,15 @@ pub async fn call_tool_with_proof(
         };
         
         // Extract data and return
+        println!("[TOOL] Full response from {}: {}", tool_name, 
+                 serde_json::to_string_pretty(&tool_result).unwrap_or_else(|_| tool_result.to_string()));
+        
         if let Some(data) = tool_result.get("data") {
             println!("[PROOF] ✓ Proof collected for {} - Verified: {}, On-chain: {}", 
                      tool_name, verified, onchain_compatible);
             return Ok((data.to_string(), crypto_proof));
         } else {
+            println!("[TOOL] No 'data' field found in response, returning full tool_result");
             return Ok((tool_result.to_string(), crypto_proof));
         }
     }

@@ -4,7 +4,8 @@
 use anyhow::{Result, anyhow};
 use serde_json::{json, Value};
 use crate::orchestration::{AgentConfig, BookingState};
-use crate::shared::{call_server_tool, call_server_tool_with_proof, submit_proof_to_attestation_service, submit_proof_to_database};
+use crate::shared::{call_server_tool_with_proof, submit_proof_to_database};
+use crate::payment::{enroll_card_if_needed, initiate_payment, retrieve_payment_credentials};
 
 /// Fetch ticket pricing with proof collection
 pub async fn get_ticket_pricing(
@@ -85,8 +86,16 @@ pub async fn complete_booking_with_payment(
     passenger_name: &str,
     passenger_email: &str,
     state: &mut BookingState,
+    progress_tx: Option<tokio::sync::mpsc::Sender<String>>,
 ) -> Result<String> {
     let client = reqwest::Client::new();
+
+    // Helper to send progress updates
+    async fn send_progress(tx: &Option<tokio::sync::mpsc::Sender<String>>, msg: &str) {
+        if let Some(sender) = tx {
+            let _ = sender.send(msg.to_string()).await;
+        }
+    }
 
     let agent_b_url = std::env::var("AGENT_B_MCP_URL")
         .unwrap_or_else(|_| "http://localhost:8001".to_string());
@@ -101,163 +110,71 @@ pub async fn complete_booking_with_payment(
 
     let session_id = session_id.to_string();
     
-    let mut enrollment_token_id = "token_789".to_string();
-    let mut enrollment_complete = false;
-    
     // NOTE: Proof verification is now delegated to Payment-Agent
     // Agent-A does NOT send proofId to payment tools.
     // Instead, Payment-Agent queries attestation service with sessionId to find and verify proofs.
 
-    // Step 1: Check if card is already enrolled (in complete_booking_with_payment)
-    if let Some(payment_url) = payment_agent_url {
-        let session_url = format!("{}/session/{}", payment_url, session_id);
-        
-        if let Ok(response) = client.get(&session_url).send().await {
-            if let Ok(session_data) = response.json::<Value>().await {
-                if let Some(data) = session_data.get("data") {
-                    if let Some(token_count) = data.get("enrolledTokenCount").and_then(|c| c.as_u64()) {
-                        if token_count > 0 {
-                            enrollment_complete = true;
-                            if let Some(token_ids) = data.get("enrolledTokenIds").and_then(|ids| ids.as_array()) {
-                                if let Some(first_token) = token_ids.first().and_then(|t| t.as_str()) {
-                                    enrollment_token_id = first_token.to_string();
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+    // Step 1-2: Check if card is enrolled, enroll if needed
+    send_progress(&progress_tx, "🔐 Enrolling card for payment...").await;
+    let (enrollment_token_id, enrollment_complete) = match enroll_card_if_needed(
+        &config,
+        &session_id,
+        payment_agent_url,
+        state,
+    ).await {
+        Ok((token_id, complete)) => {
+            println!("[PAYMENT] Card enrollment complete: {} (token: {})", complete, token_id);
+            send_progress(&progress_tx, &format!("✅ Card enrolled: {}", token_id)).await;
+            (token_id, complete)
         }
-    }
-
-    // Step 2: Enroll card if needed
-    if !enrollment_complete && payment_agent_url.is_some() {
-        let enroll_args = json!({
-            "sessionId": session_id,
-            "consumerId": "user_123",
-            "enrollmentReferenceId": "enroll_ref_456"
-        });
-        
-        // NOTE: proofId NOT sent here. Payment-Agent queries attestation service
-        // with sessionId to find and verify proofs autonomously.
-        // This prevents Agent-A from dictating which proof to verify.
-
-        match call_server_tool(
-            &client,
-            &config.server_url,
-            &agent_b_url,
-            payment_agent_url,
-            "enroll-card",
-            enroll_args,
-        )
-        .await
-        {
-            Ok(result) => {
-                if let Ok(parsed) = serde_json::from_str::<Value>(&result) {
-                    let is_success = parsed.get("success").and_then(|s| s.as_bool()).unwrap_or(false) ||
-                        parsed.get("status").and_then(|s| s.as_str()).map(|s| s == "SUCCESS").unwrap_or(false);
-                    
-                    if is_success {
-                        let token_id = parsed
-                            .get("data")
-                            .and_then(|data| data.get("tokenId"))
-                            .or_else(|| parsed.get("tokenId"))
-                            .and_then(|t| t.as_str());
-                        
-                        if let Some(token_id) = token_id {
-                            enrollment_token_id = token_id.to_string();
-                        }
-                        enrollment_complete = true;
-                    } else {
-                        return Err(anyhow!("Card enrollment failed"));
-                    }
-                }
-            }
-            Err(e) => {
-                return Err(anyhow!("Card enrollment error: {}", e));
-            }
+        Err(e) => {
+            eprintln!("[PAYMENT] Card enrollment failed: {}", e);
+            send_progress(&progress_tx, &format!("❌ Card enrollment failed: {}", e)).await;
+            return Err(e);
         }
-    }
+    };
 
     // Step 3: Initiate payment
-    let mut instruction_id = String::new();
-    if enrollment_complete && payment_agent_url.is_some() {
-        let purchase_args = json!({
-            "sessionId": session_id,
-            "consumerId": "user_123",
-            "tokenId": enrollment_token_id,
-            "amount": price.to_string(),
-            "merchant": "ZeroProof Travel"
-        });
-        
-        // NOTE: proofId NOT sent here. Payment-Agent queries attestation service
-        // with sessionId to find pricing proofs and verify amount matches.
-        // Payment-Agent is responsible for proof selection and verification.
-
-        match call_server_tool(
-            &client,
-            &config.server_url,
-            &agent_b_url,
+    let instruction_id = if enrollment_complete && payment_agent_url.is_some() {
+        send_progress(&progress_tx, "💳 Initiating payment...").await;
+        match initiate_payment(
+            &config,
+            &session_id,
+            &enrollment_token_id,
+            price,
             payment_agent_url,
-            "initiate-purchase-instruction",
-            purchase_args,
-        )
-        .await
-        {
-            Ok(result) => {
-                if let Ok(purchase_response) = serde_json::from_str::<Value>(&result) {
-                    if let Some(id) = purchase_response
-                        .get("data")
-                        .and_then(|data| data.get("instructionId"))
-                        .or_else(|| purchase_response.get("instructionId"))
-                        .and_then(|id| id.as_str())
-                    {
-                        instruction_id = id.to_string();
-                    } else {
-                        return Err(anyhow!("Could not extract instructionId from payment response"));
-                    }
-                }
+        ).await {
+            Ok(id) => {
+                println!("[PAYMENT] Payment initiated with instruction_id: {}", id);
+                send_progress(&progress_tx, &format!("💰 Payment initiated: ${:.2}", price)).await;
+                id
             }
             Err(e) => {
-                return Err(anyhow!("Payment initiation error: {}", e));
+                eprintln!("[PAYMENT] Payment initiation failed: {}", e);
+                send_progress(&progress_tx, &format!("❌ Payment initiation failed: {}", e)).await;
+                return Err(e);
             }
         }
-    }
+    } else {
+        String::new()
+    };
 
     // Step 4: Retrieve payment credentials
-    if !instruction_id.is_empty() && payment_agent_url.is_some() {
-        let retrieve_args = json!({
-            "sessionId": session_id,
-            "consumerId": "user_123",
-            "tokenId": enrollment_token_id,
-            "instructionId": instruction_id,
-            "transactionReferenceId": "txn_202"
-        });
-        
-        // NOTE: proofId NOT sent here. Payment-Agent has already queried and verified
-        // proofs during earlier payment steps (enroll-card, initiate-purchase-instruction).
-        // This step retrieves the final credentials based on verified payment state.
-
-        match call_server_tool(
-            &client,
-            &config.server_url,
-            &agent_b_url,
-            payment_agent_url,
-            "retrieve-payment-credentials",
-            retrieve_args,
-        )
-        .await
-        {
-            Ok(_result) => {
-                // Payment confirmed, continue to booking
-            }
-            Err(e) => {
-                return Err(anyhow!("Payment credential retrieval error: {}", e));
-            }
-        }
+    send_progress(&progress_tx, "🔑 Retrieving payment credentials...").await;
+    if let Err(e) = retrieve_payment_credentials(
+        &config,
+        &session_id,
+        &enrollment_token_id,
+        &instruction_id,
+        payment_agent_url,
+    ).await {
+        eprintln!("[PAYMENT] Failed to retrieve payment credentials: {}", e);
+        send_progress(&progress_tx, &format!("❌ Failed to retrieve credentials: {}", e)).await;
+        return Err(e);
     }
 
     // Step 5: Complete the flight booking
+    send_progress(&progress_tx, &format!("🛫 Booking flight from {} to {}...", from, to)).await;
     let book_args = json!({
         "from": from,
         "to": to,

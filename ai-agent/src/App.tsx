@@ -65,9 +65,9 @@ const ChatInterface: React.FC = () => {
   
   
   // Local environment
-  // const baseUrl = 'http://localhost:3001';
+  const baseUrl = 'http://localhost:3001';
   // Test Environment
-  const baseUrl = 'https://dev.agenta.zeroproofai.com';
+  // const baseUrl = 'https://dev.agenta.zeroproofai.com';
   
   // const backendApiUrl = 'http://localhost:3001/chat';
   // const proofsApiUrl = 'http://localhost:3001/proofs';
@@ -112,25 +112,64 @@ const ChatInterface: React.FC = () => {
           setSessionId(data.session_id);
         }
 
-        // Handle progress messages (real-time updates) - accumulate them
+        // Handle progress messages (real-time updates) - display them immediately
         if (data.progress && !data.response) {
           console.log('[WEBSOCKET] Progress update:', data.progress);
           progressMessagesRef.current.push(data.progress);
+          
+          // Update the last message with accumulated progress
+          setMessages((prev) => {
+            const updated = [...prev];
+            // If the last message is a progress message (from this same request), update it
+            if (updated.length > 0 && updated[updated.length - 1].role === 'assistant') {
+              const lastMsg = updated[updated.length - 1];
+              // Check if this looks like a progress message (contains emoji indicators)
+              if (lastMsg.content.match(/^[\p{Emoji}]/u) || lastMsg.content.includes('🔄') || lastMsg.content.includes('✅') || lastMsg.content.includes('❌')) {
+                // Update the last message with all accumulated progress
+                updated[updated.length - 1] = {
+                  role: 'assistant',
+                  content: progressMessagesRef.current.join('\n\n'),
+                };
+              } else {
+                // This is not a progress message, add a new one
+                updated.push({
+                  role: 'assistant',
+                  content: progressMessagesRef.current.join('\n\n'),
+                });
+              }
+            } else {
+              // No previous message, add the progress message
+              updated.push({
+                role: 'assistant',
+                content: progressMessagesRef.current.join('\n\n'),
+              });
+            }
+            return updated;
+          });
         }
         // Handle final response messages
         if (data.success && data.response) {
           console.log('[WEBSOCKET] Final response:', data.response);
           
-          // Combine all accumulated progress messages with the final response
-          const combinedContent = progressMessagesRef.current.length > 0
-            ? progressMessagesRef.current.join('\n\n') + '\n\n' + data.response
-            : data.response;
-
-          const assistantMessage: ChatMessage = {
-            role: 'assistant',
-            content: combinedContent,
-          };
-          setMessages((prev) => [...prev, assistantMessage]);
+          // Replace the last progress message with the final response
+          setMessages((prev) => {
+            const updated = [...prev];
+            if (updated.length > 0 && updated[updated.length - 1].role === 'assistant') {
+              // Replace the last message (which is the progress accumulation) with final response
+              updated[updated.length - 1] = {
+                role: 'assistant',
+                content: data.response,
+              };
+            } else {
+              // No progress message, just add the response
+              updated.push({
+                role: 'assistant',
+                content: data.response,
+              });
+            }
+            return updated;
+          });
+          
           progressMessagesRef.current = []; // Reset progress messages
           setLoading(false);
           
@@ -144,16 +183,27 @@ const ChatInterface: React.FC = () => {
         } else if (data.error) {
           console.error('[WEBSOCKET] Error from server:', data.error);
           
-          // Combine progress messages with error
-          const combinedContent = progressMessagesRef.current.length > 0
-            ? progressMessagesRef.current.join('\n\n') + '\n\nError: ' + (data.error || 'Unknown error')
-            : `Error: ${data.error || 'Unknown error'}`;
-
-          const errorMessage: ChatMessage = {
-            role: 'assistant',
-            content: combinedContent,
-          };
-          setMessages((prev) => [...prev, errorMessage]);
+          // Replace the last message with error
+          setMessages((prev) => {
+            const updated = [...prev];
+            const errorContent = `Error: ${data.error || 'Unknown error'}`;
+            
+            if (updated.length > 0 && updated[updated.length - 1].role === 'assistant') {
+              // Replace the last message with error
+              updated[updated.length - 1] = {
+                role: 'assistant',
+                content: errorContent,
+              };
+            } else {
+              // Add error as new message
+              updated.push({
+                role: 'assistant',
+                content: errorContent,
+              });
+            }
+            return updated;
+          });
+          
           progressMessagesRef.current = []; // Reset progress messages
           setLoading(false);
         }

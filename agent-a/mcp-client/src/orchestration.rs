@@ -395,6 +395,7 @@ pub async fn process_user_query(
                                 &passenger_name,
                                 &passenger_email,
                                 state,
+                                progress_tx.clone(),
                             )
                             .await
                             {
@@ -430,6 +431,8 @@ pub async fn process_user_query(
                         let mut results = Vec::new();
                         
                         for (tool_name, arguments) in &tool_calls {
+                            send_progress(&progress_tx, &format!("🔧 Calling tool: {}", tool_name)).await;
+                            
                             match call_server_tool(
                                 &client,
                                 &config.server_url,
@@ -441,9 +444,11 @@ pub async fn process_user_query(
                             .await
                             {
                                 Ok(result) => {
+                                    send_progress(&progress_tx, &format!("✅ {} completed", tool_name)).await;
                                     results.push(format!("Tool: {} | Result: {}", tool_name, result));
                                 }
                                 Err(e) => {
+                                    send_progress(&progress_tx, &format!("❌ {} failed: {}", tool_name, e)).await;
                                     results.push(format!("Tool: {} | Error: {}", tool_name, e));
                                 }
                             }

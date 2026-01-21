@@ -173,52 +173,83 @@ pub async fn fetch_all_tools(
 /// Parse Claude's tool recommendations from JSON response
 pub fn parse_tool_calls(claude_response: &str) -> Result<Vec<(String, Value)>> {
     let json_start = claude_response.find('{');
-    let json_end = claude_response.rfind('}');
     
     println!("[PARSER] Looking for JSON in response (length: {})", claude_response.len());
-    println!("[PARSER] First {{ at: {:?}, Last }} at: {:?}", json_start, json_end);
+    println!("[PARSER] First {{ at: {:?}", json_start);
 
-    if let (Some(start), Some(end)) = (json_start, json_end) {
-        let json_str = &claude_response[start..=end];
-        println!("[PARSER] Extracted JSON (length: {}): {}", json_str.len(), 
-                 &json_str[..json_str.len().min(200)]);
-        println!("[PARSER] Last 100 chars: {}", 
-                 &json_str[json_str.len().saturating_sub(100)..]);
+    if let Some(start) = json_start {
+        // Find the matching closing brace by counting braces
+        let mut brace_count = 0;
+        let mut in_string = false;
+        let mut escape_next = false;
+        let mut json_end = None;
         
-        match serde_json::from_str::<Value>(json_str) {
-            Ok(parsed) => {
-                println!("[PARSER] ✓ JSON parsed successfully");
-                println!("[PARSER] Root keys: {:?}", parsed.as_object().map(|o| o.keys().collect::<Vec<_>>()));
-                
-                let mut tools = Vec::new();
-                if let Some(tool_calls) = parsed.get("tool_calls").and_then(|t| t.as_array()) {
-                    println!("[PARSER] ✓ Found tool_calls array with {} items", tool_calls.len());
-                    for (i, call) in tool_calls.iter().enumerate() {
-                        if let (Some(name), Some(args)) = (
-                            call.get("name").and_then(|n| n.as_str()),
-                            call.get("arguments"),
-                        ) {
-                            println!("[PARSER]   Tool {}: name={}", i, name);
-                            tools.push((name.to_string(), args.clone()));
-                        }
-                    }
-                } else {
-                    println!("[PARSER] ✗ tool_calls field not found or not an array");
-                    if let Some(tc) = parsed.get("tool_calls") {
-                        println!("[PARSER] tool_calls value: {:?}", tc);
+        for (i, ch) in claude_response[start..].char_indices() {
+            if escape_next {
+                escape_next = false;
+                continue;
+            }
+            
+            match ch {
+                '\\' if in_string => escape_next = true,
+                '"' => in_string = !in_string,
+                '{' if !in_string => brace_count += 1,
+                '}' if !in_string => {
+                    brace_count -= 1;
+                    if brace_count == 0 {
+                        json_end = Some(start + i);
+                        break;
                     }
                 }
-                Ok(tools)
-            }
-            Err(e) => {
-                println!("[PARSER] ✗ JSON parse error: {}", e);
-                println!("[PARSER] Full extracted JSON for debugging:");
-                println!("{}", json_str);
-                Err(anyhow!("JSON parse error: {}", e))
+                _ => {}
             }
         }
+
+        if let Some(end) = json_end {
+            let json_str = &claude_response[start..=end];
+            println!("[PARSER] Extracted JSON (length: {}): {}", json_str.len(), 
+                     &json_str[..json_str.len().min(200)]);
+            println!("[PARSER] Last 100 chars: {}", 
+                     &json_str[json_str.len().saturating_sub(100)..]);
+            
+            match serde_json::from_str::<Value>(json_str) {
+                Ok(parsed) => {
+                    println!("[PARSER] ✓ JSON parsed successfully");
+                    println!("[PARSER] Root keys: {:?}", parsed.as_object().map(|o| o.keys().collect::<Vec<_>>()));
+                    
+                    let mut tools = Vec::new();
+                    if let Some(tool_calls) = parsed.get("tool_calls").and_then(|t| t.as_array()) {
+                        println!("[PARSER] ✓ Found tool_calls array with {} items", tool_calls.len());
+                        for (i, call) in tool_calls.iter().enumerate() {
+                            if let (Some(name), Some(args)) = (
+                                call.get("name").and_then(|n| n.as_str()),
+                                call.get("arguments"),
+                            ) {
+                                println!("[PARSER]   Tool {}: name={}", i, name);
+                                tools.push((name.to_string(), args.clone()));
+                            }
+                        }
+                    } else {
+                        println!("[PARSER] ✗ tool_calls field not found or not an array");
+                        if let Some(tc) = parsed.get("tool_calls") {
+                            println!("[PARSER] tool_calls value: {:?}", tc);
+                        }
+                    }
+                    Ok(tools)
+                }
+                Err(e) => {
+                    println!("[PARSER] ✗ JSON parse error: {}", e);
+                    println!("[PARSER] Full extracted JSON for debugging:");
+                    println!("{}", json_str);
+                    Err(anyhow!("JSON parse error: {}", e))
+                }
+            }
+        } else {
+            println!("[PARSER] ✗ Could not find matching closing brace");
+            Err(anyhow!("Could not find matching closing brace for JSON"))
+        }
     } else {
-        println!("[PARSER] ✗ Could not find {{ or }}");
+        println!("[PARSER] ✗ Could not find {{");
         Err(anyhow!("Could not parse tool calls from Claude response"))
     }
 }
