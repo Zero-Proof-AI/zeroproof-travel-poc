@@ -28,7 +28,12 @@ FROM debian:bookworm-slim
 
 WORKDIR /app
 
-# Runtime container already has curl and needed utilities
+# Install runtime dependencies (including OpenSSL 3)
+RUN apt-get update && apt-get install -y \
+    libssl3 \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy the built binary from builder
 COPY --from=builder /app/target/release/agent-b-mcp-server /app/agent-b-mcp-server
