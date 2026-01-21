@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use crate::shared::{fetch_all_tools, parse_tool_calls, call_claude, call_server_tool, CryptographicProof};
 use crate::prompts::extract_with_claude;
-use crate::booking::{complete_booking_with_payment, get_ticket_pricing};
+use crate::booking::{complete_booking, get_ticket_pricing};
+use crate::payment::{enroll_card_if_needed, initiate_payment, retrieve_payment_credentials};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ClaudeMessage {
@@ -21,7 +22,7 @@ pub struct ClaudeMessage {
 /// Booking state tracking across multi-turn conversations
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BookingState {
-    pub step: String, // "initial", "pricing", "passenger_name", "passenger_email", "payment_method", "enrollment_confirmation", "payment", "completed"
+    pub step: String, // "initial", "pricing", "passenger_name", "passenger_email", "payment_method", "enrollment_confirmation", "enrollment", "initiate-payment", "retrieve-credentials", "payment", "completed"
     pub from: String,
     pub to: String,
     pub price: f64,
@@ -377,24 +378,167 @@ pub async fn process_user_query(
                                 return Ok((response, updated_messages, state.clone()));
                             }
                             
+                            let passenger_name = state.passenger_name.clone().unwrap_or_default();
+
+                            // Update state to enrollment
+                            state.step = "enrollment".to_string();
+                            send_progress(&progress_tx, "🔐 Enrolling card for payment... (Please wait, it takes time to generate ZKP)").await;
+
+                            // Enroll card
+                            let payment_agent_url = if config.payment_agent_enabled {
+                                config.payment_agent_url.as_deref()
+                            } else {
+                                None
+                            };
+
+                            let enrollment_result = enroll_card_if_needed(
+                                &config,
+                                &session_id,
+                                payment_agent_url,
+                                state,
+                                progress_tx.clone(),
+                            ).await;
+
+                            match enrollment_result {
+                                Ok((token_id, enrollment_complete)) => {
+                                    println!("[ORCHESTRATION] Card enrollment complete: {} (token: {})", enrollment_complete, token_id);
+                                    send_progress(&progress_tx, &format!("✅ Card enrolled: {}", token_id)).await;
+                                    
+                                    // Store token and update state for next step
+                                    state.enrollment_token_id = Some(token_id);
+                                    state.step = "initiate-payment".to_string();
+                                    
+                                    // Continue to payment initiation step automatically (don't return)
+                                }
+                                Err(e) => {
+                                    eprintln!("[ORCHESTRATION] Card enrollment failed: {}", e);
+                                    send_progress(&progress_tx, &format!("❌ Card enrollment failed: {}", e)).await;
+                                    let err_response = format!("Agent A: Card enrollment failed: {}.\n\nWould you like to retry enrollment or restart the booking process?\n\nReply with 'retry' to try again, or 'restart' to begin over.", e);
+                                    updated_messages.push(ClaudeMessage {
+                                        role: "assistant".to_string(),
+                                        content: err_response.clone(),
+                                    });
+                                    return Ok((err_response, updated_messages, state.clone()));
+                                }
+                            }
+                        }
+                        
+                        if state.step == "initiate-payment" {
+                            // Payment initiation step - separate from booking
                             let from = state.from.clone();
                             let to = state.to.clone();
                             let price = state.price;
                             let passenger_name = state.passenger_name.clone().unwrap_or_default();
                             let passenger_email = state.passenger_email.clone().unwrap_or_default();
+                            let enrollment_token_id = state.enrollment_token_id.clone().unwrap_or_default();
 
-                            // Update state to payment
-                            state.step = "payment".to_string();
-                            send_progress(&progress_tx, &format!("💳 Processing payment for {} booking", passenger_name)).await;
+                            send_progress(&progress_tx, &format!("💳 Initiating payment for ${:.2}...(Please wait, it takes time to generate ZKP)", price)).await;
+                            
+                            let payment_agent_url = if config.payment_agent_enabled {
+                                config.payment_agent_url.as_deref()
+                            } else {
+                                None
+                            };
 
-                            match complete_booking_with_payment(
+                            match initiate_payment(
                                 config,
-                                session_id,
+                                &session_id,
+                                &enrollment_token_id,
+                                price,
+                                payment_agent_url,
+                            ).await {
+                                Ok(instruction_id) => {
+                                    println!("[ORCHESTRATION] Payment initiated with instruction_id: {}", instruction_id);
+                                    send_progress(&progress_tx, &format!("✅ Payment initiated: ${:.2}", price)).await;
+                                    
+                                    // Store instruction_id and update state for next step
+                                    state.instruction_id = Some(instruction_id);
+                                    state.step = "retrieve-credentials".to_string();
+                                    
+                                    // Continue to credential retrieval step automatically (don't return)
+                                }
+                                Err(e) => {
+                                    eprintln!("[ORCHESTRATION] Payment initiation failed: {}", e);
+                                    send_progress(&progress_tx, &format!("❌ Payment initiation failed: {}", e)).await;
+                                    let err_response = format!("Agent A: Payment initiation failed: {}.\n\nWould you like to retry or restart the booking process?\n\nReply with 'retry' to try again, or 'restart' to begin over.", e);
+                                    updated_messages.push(ClaudeMessage {
+                                        role: "assistant".to_string(),
+                                        content: err_response.clone(),
+                                    });
+                                    return Ok((err_response, updated_messages, state.clone()));
+                                }
+                            }
+                        }
+                        
+                        if state.step == "retrieve-credentials" {
+                            // Retrieve payment credentials step - separate from booking
+                            let enrollment_token_id = state.enrollment_token_id.clone().unwrap_or_default();
+                            let instruction_id = state.instruction_id.clone().unwrap_or_default();
+
+                            send_progress(&progress_tx, "🔑 Retrieving payment credentials...").await;
+
+                            let payment_agent_url = if config.payment_agent_enabled {
+                                config.payment_agent_url.as_deref()
+                            } else {
+                                None
+                            };
+
+                            match retrieve_payment_credentials(
+                                config,
+                                &session_id,
+                                &enrollment_token_id,
+                                &instruction_id,
+                                payment_agent_url,
+                            ).await {
+                                Ok(_) => {
+                                    println!("[ORCHESTRATION] Payment credentials retrieved");
+                                    send_progress(&progress_tx, "✅ Payment credentials retrieved").await;
+                                    
+                                    // Update state for next step
+                                    state.step = "payment".to_string();
+                                    
+                                    // Continue to payment step automatically (don't return)
+                                }
+                                Err(e) => {
+                                    eprintln!("[ORCHESTRATION] Credential retrieval failed: {}", e);
+                                    send_progress(&progress_tx, &format!("❌ Failed to retrieve credentials: {}", e)).await;
+                                    let err_response = format!("Agent A: Credential retrieval failed: {}.
+
+Would you like to retry or restart the booking process?
+
+Reply with 'retry' to try again, or 'restart' to begin over.", e);
+                                    updated_messages.push(ClaudeMessage {
+                                        role: "assistant".to_string(),
+                                        content: err_response.clone(),
+                                    });
+                                    return Ok((err_response, updated_messages, state.clone()));
+                                }
+                            }
+                        }
+                        
+                        if state.step == "payment" {
+                            // Complete booking step - flight booking only
+                            let from = state.from.clone();
+                            let to = state.to.clone();
+                            let price = state.price;
+                            let passenger_name = state.passenger_name.clone().unwrap_or_default();
+                            let passenger_email = state.passenger_email.clone().unwrap_or_default();
+                            let enrollment_token_id = state.enrollment_token_id.clone().unwrap_or_default();
+                            let instruction_id = state.instruction_id.clone().unwrap_or_default();
+
+                            send_progress(&progress_tx, &format!("✈️  Completing booking for {} booking", passenger_name)).await;
+
+                            // Complete booking with payment (credentials retrieval + flight booking)
+                            match complete_booking(
+                                config,
+                                &session_id,
                                 &from,
                                 &to,
                                 price,
                                 &passenger_name,
                                 &passenger_email,
+                                &enrollment_token_id,
+                                &instruction_id,
                                 state,
                                 progress_tx.clone(),
                             )
@@ -408,7 +552,7 @@ pub async fn process_user_query(
                                         role: "assistant".to_string(),
                                         content: result.clone(),
                                     });
-                                    Ok((result, updated_messages, state.clone()))
+                                    return Ok((result, updated_messages, state.clone()));
                                 }
                                 Err(e) => {
                                     let err_response = format!("Agent A: There was an issue processing your booking: {}\n\nPlease try again or contact support.", e);
@@ -416,18 +560,19 @@ pub async fn process_user_query(
                                         role: "assistant".to_string(),
                                         content: err_response.clone(),
                                     });
-                                    Ok((err_response, updated_messages, state.clone()))
+                                    return Ok((err_response, updated_messages, state.clone()));
                                 }
                             }
-                        } else {
-                            // Fallback: shouldn't reach here, but handle gracefully
-                            let response = "Agent A: I'm ready to help with your booking. Could you please confirm your enrollment details?".to_string();
-                            updated_messages.push(ClaudeMessage {
-                                role: "assistant".to_string(),
-                                content: response.clone(),
-                            });
-                            Ok((response, updated_messages, state.clone()))
                         }
+                        
+                        // If we reach here, none of the payment steps matched
+                        // This shouldn't happen in normal flow
+                        let response = "Agent A: I'm ready to help with your booking.".to_string();
+                        updated_messages.push(ClaudeMessage {
+                            role: "assistant".to_string(),
+                            content: response.clone(),
+                        });
+                        Ok((response, updated_messages, state.clone()))
                     } else {
                         // Non-pricing, non-booking tool flow - execute all tools
                         let mut results = Vec::new();

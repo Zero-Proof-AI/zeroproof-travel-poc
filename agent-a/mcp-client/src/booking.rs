@@ -5,7 +5,6 @@ use anyhow::{Result, anyhow};
 use serde_json::{json, Value};
 use crate::orchestration::{AgentConfig, BookingState};
 use crate::shared::{call_server_tool_with_proof, submit_proof_to_database_with_progress};
-use crate::payment::{enroll_card_if_needed, initiate_payment, retrieve_payment_credentials};
 
 /// Fetch ticket pricing with proof collection
 pub async fn get_ticket_pricing(
@@ -77,8 +76,8 @@ pub async fn get_ticket_pricing(
     }
 }
 
-/// Complete a flight booking with payment processing
-pub async fn complete_booking_with_payment(
+/// Complete a flight booking
+pub async fn complete_booking(
     config: &AgentConfig,
     session_id: &str,
     from: &str,
@@ -86,6 +85,8 @@ pub async fn complete_booking_with_payment(
     price: f64,
     passenger_name: &str,
     passenger_email: &str,
+    enrollment_token_id: &str,
+    instruction_id: &str,
     state: &mut BookingState,
     progress_tx: Option<tokio::sync::mpsc::Sender<String>>,
 ) -> Result<String> {
@@ -115,67 +116,10 @@ pub async fn complete_booking_with_payment(
     // Agent-A does NOT send proofId to payment tools.
     // Instead, Payment-Agent queries attestation service with sessionId to find and verify proofs.
 
-    // Step 1-2: Check if card is enrolled, enroll if needed
-    send_progress(&progress_tx, "🔐 Enrolling card for payment...").await;
-    let (enrollment_token_id, enrollment_complete) = match enroll_card_if_needed(
-        &config,
-        &session_id,
-        payment_agent_url,
-        state,
-        progress_tx.clone(),
-    ).await {
-        Ok((token_id, complete)) => {
-            println!("[PAYMENT] Card enrollment complete: {} (token: {})", complete, token_id);
-            send_progress(&progress_tx, &format!("✅ Card enrolled: {}", token_id)).await;
-            (token_id, complete)
-        }
-        Err(e) => {
-            eprintln!("[PAYMENT] Card enrollment failed: {}", e);
-            send_progress(&progress_tx, &format!("❌ Card enrollment failed: {}", e)).await;
-            return Err(e);
-        }
-    };
+    // Payment initiation and credential retrieval are now handled separately in orchestration
+    // This function now focuses on: flight booking only
 
-    // Step 3: Initiate payment
-    let instruction_id = if enrollment_complete && payment_agent_url.is_some() {
-        send_progress(&progress_tx, "💳 Initiating payment...").await;
-        match initiate_payment(
-            &config,
-            &session_id,
-            &enrollment_token_id,
-            price,
-            payment_agent_url,
-        ).await {
-            Ok(id) => {
-                println!("[PAYMENT] Payment initiated with instruction_id: {}", id);
-                send_progress(&progress_tx, &format!("💰 Payment initiated: ${:.2}", price)).await;
-                id
-            }
-            Err(e) => {
-                eprintln!("[PAYMENT] Payment initiation failed: {}", e);
-                send_progress(&progress_tx, &format!("❌ Payment initiation failed: {}", e)).await;
-                return Err(e);
-            }
-        }
-    } else {
-        String::new()
-    };
-
-    // Step 4: Retrieve payment credentials
-    send_progress(&progress_tx, "🔑 Retrieving payment credentials...").await;
-    if let Err(e) = retrieve_payment_credentials(
-        &config,
-        &session_id,
-        &enrollment_token_id,
-        &instruction_id,
-        payment_agent_url,
-    ).await {
-        eprintln!("[PAYMENT] Failed to retrieve payment credentials: {}", e);
-        send_progress(&progress_tx, &format!("❌ Failed to retrieve credentials: {}", e)).await;
-        return Err(e);
-    }
-
-    // Step 5: Complete the flight booking
+    // Complete the flight booking
     send_progress(&progress_tx, &format!("🛫 Booking flight from {} to {}...", from, to)).await;
     let book_args = json!({
         "from": from,
