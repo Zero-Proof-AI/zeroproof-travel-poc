@@ -97,29 +97,13 @@ const ChatInterface: React.FC = () => {
   
   
   // Local environment
-  const baseUrl = 'http://localhost:3001';
+  // const baseUrl = 'http://localhost:3001';
   // Test Environment
-  // const baseUrl = 'https://dev.agenta.zeroproofai.com';
-  
-  // const backendApiUrl = 'http://localhost:3001/chat';
-  // const proofsApiUrl = 'http://localhost:3001/proofs';
-  // const verifyProofUrl = 'http://localhost:3001/proofs/verify';
+  const baseUrl = 'https://dev.agenta.zeroproofai.com';
  
   const wsUrl = baseUrl.replace('https://', 'wss://').replace('http://', 'ws://');
   const proofsApiUrl = `${baseUrl}/proofs`;
   const verifyProofUrl = `${baseUrl}/proofs/verify`;
-
-  // Auto-scroll progress panel to bottom
-  const scrollProgressToBottom = () => {
-    if (progressPanelRef.current) {
-      // Use a small delay to ensure DOM has updated
-      setTimeout(() => {
-        if (progressPanelRef.current) {
-          progressPanelRef.current.scrollTop = progressPanelRef.current.scrollHeight;
-        }
-      }, 10);
-    }
-  };
 
   // WebSocket connection management
   const connectWebSocket = () => {
