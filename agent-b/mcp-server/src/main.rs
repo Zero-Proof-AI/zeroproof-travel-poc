@@ -19,6 +19,7 @@ use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 
 use pricing_core::pricing;
+use pricing_core::booking;
 
 /// Pricing Tool Request
 #[derive(Debug, Deserialize)]
@@ -214,17 +215,17 @@ async fn book_flight(
         ));
     }
 
-    // Use pricing-core to generate booking
-    let core_req = pricing_core::booking::Request {
+    // Use pricing-core to generate booking (async version that calls httpbin.org)
+    let core_req = booking::Request {
         from: req.from.clone(),
         to: req.to.clone(),
         passenger_name: req.passenger_name.clone(),
         passenger_email: req.passenger_email.clone(),
     };
 
-    let core_resp = pricing_core::booking::handle(core_req);
+    let core_resp = booking::handle_async(core_req).await;
     
-    tracing::info!("[BOOK-FLIGHT] Successfully booked flight: booking_id={}, confirmation_code={}, status={}", core_resp.booking_id, core_resp.confirmation_code, core_resp.status);
+    tracing::info!("[BOOK-FLIGHT] result: booking_id={}, confirmation_code={}, status={}", core_resp.booking_id, core_resp.confirmation_code, core_resp.status);
 
     Ok(Json(ToolResponse::ok(BookResponse {
         booking_id: core_resp.booking_id,

@@ -111,8 +111,6 @@ pub async fn process_user_query(
         }
     }
 
-    send_progress(&progress_tx, "🔄 Processing request...").await;
-
     // Fetch tool definitions
     let agent_b_url = std::env::var("AGENT_B_MCP_URL")
         .unwrap_or_else(|_| "http://localhost:8001".to_string());
@@ -130,13 +128,13 @@ pub async fn process_user_query(
        (state.step == "passenger_email" && state.passenger_email.is_none()) ||
        (state.step == "payment_method") {
         println!("[EXTRACTION MODE] Detected extraction state: '{}' - skipping tool-based Claude call", state.step);
-        send_progress(&progress_tx, "📝 Extracting passenger information...").await;
         
         let mut updated_messages = messages.to_vec();
         
         if state.step == "passenger_name" && state.passenger_name.is_none() {
             println!("[CONDITION CHECK] ✓ Name condition matched: step='{}' | passenger_name.is_none()={}", 
                      state.step, state.passenger_name.is_none());
+            send_progress(&progress_tx, "📝 Extracting passenger name...").await;
             let extracted_name = extract_with_claude(&client, config, "passenger_name", user_query, state, &serde_json::json!([])).await?;
             
             if !extracted_name.is_empty() {
@@ -166,6 +164,7 @@ pub async fn process_user_query(
         if state.step == "passenger_email" && state.passenger_email.is_none() {
             println!("[CONDITION CHECK] ✓ Email condition matched: step='{}' | passenger_email.is_none()={}", 
                      state.step, state.passenger_email.is_none());
+            send_progress(&progress_tx, "📝 Extracting passenger email...").await;
             let extracted_email = extract_with_claude(&client, config, "passenger_email", user_query, state, &serde_json::json!([])).await?;
             
             if !extracted_email.is_empty() {
@@ -195,6 +194,7 @@ pub async fn process_user_query(
         
         if state.step == "payment_method" {
             println!("[CONDITION CHECK] ✓ Payment method condition matched: step='{}'", state.step);
+            send_progress(&progress_tx, "📝 Extracting payment method...").await;
             let payment_method = extract_with_claude(&client, config, "payment_method", user_query, state, &serde_json::json!([])).await?;
             println!("[DEBUG] Extracted payment_method: '{}' (empty: {})", payment_method, payment_method.is_empty());
             

@@ -33,7 +33,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 reqwest = { version = "0.12", features = ["json"] }
 
 # Local pricing core
-pricing-core = { path = "../pricing-core" }
+pricing-core = { path = "../pricing-core", features = ["http"] }
 
 [profile.release]
 opt-level = 3

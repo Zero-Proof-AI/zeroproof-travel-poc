@@ -82,25 +82,25 @@ async fn book_handler(
             Ok(resp) => resp,
             Err(e) => {
                 eprintln!("⚠ Booking API call failed: {}, using fallback", e);
-                // Fallback to deterministic logic
+                // Fallback to async booking logic
                 let core_req = booking::Request {
                     from: req.from.clone(),
                     to: req.to.clone(),
                     passenger_name: req.passenger_name.clone(),
                     passenger_email: req.passenger_email.clone(),
                 };
-                booking::handle(core_req)
+                booking::handle_async(core_req).await
             }
         }
     } else {
-        // Use deterministic booking logic from pricing-core
+        // Use async booking logic
         let core_req = booking::Request {
             from: req.from,
             to: req.to,
             passenger_name: req.passenger_name,
             passenger_email: req.passenger_email,
         };
-        booking::handle(core_req)
+        booking::handle_async(core_req).await
     };
 
     Json(BookResponse {

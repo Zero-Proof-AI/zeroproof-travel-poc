@@ -135,7 +135,7 @@ async fn health() -> Json<HealthResponse> {
 
 /// Helper to get attestation service URL from environment or default
 fn get_attestation_service_url() -> String {
-    std::env::var("ATTESTATION_SERVICE_URL")
+    std::env::var("ATTESTER_URL")
         .unwrap_or_else(|_| "http://localhost:8000".to_string())
 }
 
@@ -643,7 +643,7 @@ async fn main() {
         println!("  zkfetch-wrapper URL: NOT CONFIGURED - proofs will NOT be collected");
     }
     
-    if let Ok(attestation_url) = std::env::var("ATTESTATION_SERVICE_URL") {
+    if let Ok(attestation_url) = std::env::var("ATTESTER_URL") {
         println!("  Attestation Service URL: {}", attestation_url);
     } else {
         println!("  Attestation Service URL: http://localhost:8000 (default)");
