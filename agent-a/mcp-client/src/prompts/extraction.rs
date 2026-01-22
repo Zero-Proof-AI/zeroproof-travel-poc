@@ -40,6 +40,66 @@ pub fn get_payment_method_extraction_prompt(user_input: &str) -> String {
     )
 }
 
+/// Get prompt for extracting departure city from user input
+pub fn get_departure_city_extraction_prompt(user_input: &str) -> String {
+    format!(
+        "Extract the departure city from this user input: \"{}\"\n\n\
+         Common city codes: NYC (New York), LAX (Los Angeles), ORD (Chicago), SFO (San Francisco), \
+         LON (London), PAR (Paris), LHR (London), CDG (Paris), NRT (Tokyo), SYD (Sydney), DXB (Dubai), SIN (Singapore), BOS (Boston)\n\n\
+         Respond with ONLY the city code (e.g., 'NYC', 'LAX', 'BOS'), nothing else. \
+         If no departure city is provided, respond with: NONE",
+        user_input
+    )
+}
+
+/// Get prompt for extracting departure city from user input with context
+pub fn get_departure_city_extraction_prompt_with_context(user_input: &str, known_destination: Option<&str>) -> String {
+    let context = if let Some(dest) = known_destination {
+        format!("Context: The destination city is already set to {}. ", dest)
+    } else {
+        String::new()
+    };
+    
+    format!(
+        "{}Extract the departure city from this user input: \"{}\"\n\n\
+         Common city codes: NYC (New York), LAX (Los Angeles), ORD (Chicago), SFO (San Francisco), \
+         LON (London), PAR (Paris), LHR (London), CDG (Paris), NRT (Tokyo), SYD (Sydney), DXB (Dubai), SIN (Singapore), BOS (Boston)\n\n\
+         Respond with ONLY the city code (e.g., 'NYC', 'LAX', 'BOS'), nothing else. \
+         If no departure city is provided, respond with: NONE",
+        context, user_input
+    )
+}
+
+/// Get prompt for extracting destination city from user input
+pub fn get_destination_city_extraction_prompt(user_input: &str) -> String {
+    format!(
+        "Extract the destination city from this user input: \"{}\"\n\n\
+         Common city codes: NYC (New York), LAX (Los Angeles), ORD (Chicago), SFO (San Francisco), \
+         LON (London), PAR (Paris), LHR (London), CDG (Paris), NRT (Tokyo), SYD (Sydney), DXB (Dubai), SIN (Singapore), BOS (Boston)\n\n\
+         Respond with ONLY the city code (e.g., 'NYC', 'LAX', 'BOS'), nothing else. \
+         If no destination city is provided, respond with: NONE",
+        user_input
+    )
+}
+
+/// Get prompt for extracting destination city from user input with context
+pub fn get_destination_city_extraction_prompt_with_context(user_input: &str, known_departure: Option<&str>) -> String {
+    let context = if let Some(dep) = known_departure {
+        format!("Context: The departure city is already set to {}. ", dep)
+    } else {
+        String::new()
+    };
+    
+    format!(
+        "{}Extract the destination city from this user input: \"{}\"\n\n\
+         Common city codes: NYC (New York), LAX (Los Angeles), ORD (Chicago), SFO (San Francisco), \
+         LON (London), PAR (Paris), LHR (London), CDG (Paris), NRT (Tokyo), SYD (Sydney), DXB (Dubai), SIN (Singapore), BOS (Boston)\n\n\
+         Respond with ONLY the city code (e.g., 'NYC', 'LAX', 'BOS'), nothing else. \
+         If no destination city is provided, respond with: NONE",
+        context, user_input
+    )
+}
+
 /// Extract information from user input using Claude's understanding
 pub async fn extract_with_claude(
     client: &reqwest::Client,
@@ -53,6 +113,8 @@ pub async fn extract_with_claude(
         "passenger_name" => get_passenger_name_extraction_prompt(user_input),
         "passenger_email" => get_passenger_email_extraction_prompt(user_input),
         "payment_method" => get_payment_method_extraction_prompt(user_input),
+        "departure_city" => get_departure_city_extraction_prompt(user_input),
+        "destination_city" => get_destination_city_extraction_prompt(user_input),
         _ => return Ok(String::new()),
     };
 
@@ -107,6 +169,18 @@ pub async fn extract_with_claude(
             // If we got a clear response, return it
             if trimmed != "NONE" && !trimmed.is_empty() {
                 return Ok(trimmed.to_string());
+            }
+        }
+
+        // Validation for city codes - ensure uppercase 3-letter codes
+        if field == "departure_city" || field == "destination_city" {
+            let city_code = trimmed.to_uppercase();
+            if city_code.len() == 3 && city_code.chars().all(|c| c.is_alphabetic()) {
+                println!("[DEBUG] Valid city code extracted for {}: '{}'", field, city_code);
+                return Ok(city_code);
+            } else {
+                println!("[DEBUG] Invalid city code format: '{}' - returning empty", city_code);
+                return Ok(String::new());
             }
         }
         

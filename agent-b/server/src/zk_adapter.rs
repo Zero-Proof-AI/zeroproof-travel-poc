@@ -4,7 +4,6 @@
 /// to zkVM input formats. This keeps Agent B's internal zkVM structure
 /// private while allowing external agents to interact via simple JSON.
 
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use pricing_core::{pricing, booking, RpcCall};
 

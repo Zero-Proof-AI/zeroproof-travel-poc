@@ -53,9 +53,5 @@ lazy_static = "1.4"
 regex = "1.10"
 
 [[bin]]
-name = "mcp-client"
-path = "src/main.rs"
-
-[[bin]]
 name = "mcp-client-http"
-path = "src/http_server.rs"
+path = "src/main.rs"

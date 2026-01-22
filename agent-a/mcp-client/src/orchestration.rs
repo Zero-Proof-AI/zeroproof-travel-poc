@@ -9,7 +9,7 @@ use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use crate::shared::{fetch_all_tools, parse_tool_calls, call_claude, call_server_tool, CryptographicProof};
-use crate::prompts::extract_with_claude;
+use crate::prompts::{extract_with_claude, get_destination_city_extraction_prompt_with_context, get_departure_city_extraction_prompt_with_context};
 use crate::booking::{complete_booking, get_ticket_pricing};
 use crate::payment::{enroll_card_if_needed, initiate_payment, retrieve_payment_credentials};
 
@@ -239,13 +239,83 @@ pub async fn process_user_query(
             }
             
             if tool_calls.is_empty() {
-                // No tools needed, return Claude's response
+                // No tools needed, extract city information using Claude and extract user_message from JSON
+                println!("[PARSE] No tools in response, extracting city information using Claude");
+                println!("[STATE] Current state - from: '{}', to: '{}'", state.from, state.to);
+                
+                // Get client and extract cities with context awareness
+                let client = reqwest::Client::new();
+                
+                // Only extract destination if not already set
+                if state.to.is_empty() {
+                    let dest_prompt = get_destination_city_extraction_prompt_with_context(
+                        &user_query,
+                        if !state.from.is_empty() { Some(&state.from) } else { None }
+                    );
+                    
+                    // Call Claude directly with the context-aware prompt
+                    let dest_response = call_claude(
+                        &client,
+                        config,
+                        &dest_prompt,
+                        &[],
+                        state,
+                        &tool_definitions,
+                        Some("You are a city code extraction assistant. Respond with only the city code or NONE."),
+                    ).await.unwrap_or_default();
+                    
+                    let to_city = dest_response.trim().to_uppercase();
+                    if to_city != "NONE" && !to_city.is_empty() && to_city.len() == 3 {
+                        state.to = to_city.clone();
+                        println!("[STATE] 📍 Set destination to: {}", to_city);
+                    }
+                }
+                
+                // Only extract departure if not already set
+                if state.from.is_empty() {
+                    let dept_prompt = get_departure_city_extraction_prompt_with_context(
+                        &user_query,
+                        if !state.to.is_empty() { Some(&state.to) } else { None }
+                    );
+                    
+                    // Call Claude directly with the context-aware prompt
+                    let dept_response = call_claude(
+                        &client,
+                        config,
+                        &dept_prompt,
+                        &[],
+                        state,
+                        &tool_definitions,
+                        Some("You are a city code extraction assistant. Respond with only the city code or NONE."),
+                    ).await.unwrap_or_default();
+                    
+                    let from_city = dept_response.trim().to_uppercase();
+                    if from_city != "NONE" && !from_city.is_empty() && from_city.len() == 3 {
+                        state.from = from_city.clone();
+                        println!("[STATE] 📍 Set departure from: {}", from_city);
+                    }
+                }
+                
+                let user_msg = if let Ok(parsed) = serde_json::from_str::<Value>(&claude_response) {
+                    if let Some(msg) = parsed.get("user_message").and_then(|m| m.as_str()) {
+                        println!("[PARSE] ✓ Extracted user_message: {}", msg);
+                        msg.to_string()
+                    } else {
+                        println!("[PARSE] No user_message field found, using full response");
+                        claude_response.clone()
+                    }
+                } else {
+                    println!("[PARSE] Could not parse JSON, using full response");
+                    claude_response.clone()
+                };
+                
+                let response = format!("Agent A: {}", user_msg);
                 updated_messages.push(ClaudeMessage {
                     role: "assistant".to_string(),
-                    content: claude_response.clone(),
+                    content: response.clone(),
                 });
                 
-                Ok((format!("Agent A: {}", claude_response), updated_messages, state.clone()))
+                Ok((response, updated_messages, state.clone()))
             } else {
                 // Check if this is a pricing inquiry (get-ticket-price)
                 let is_pricing_request = tool_calls.iter()
@@ -623,12 +693,22 @@ Reply with 'retry' to try again, or 'restart' to begin over.", e);
             }
         }
         Err(e) => {
-            // Parse failed, log details and return raw response
+            // Parse failed, but try to extract user_message from JSON first
             eprintln!("[PARSE ERROR] Failed to parse tool calls: {}", e);
             eprintln!("[PARSE ERROR] Claude response (first 500 chars): {}", 
                      &claude_response[..claude_response.len().min(500)]);
             
-            let response = format!("Agent A: {}", claude_response);
+            // Try to extract just the user_message if available
+            let response = if let Ok(parsed) = serde_json::from_str::<Value>(&claude_response) {
+                if let Some(msg) = parsed.get("user_message").and_then(|m| m.as_str()) {
+                    format!("Agent A: {}", msg)
+                } else {
+                    format!("Agent A: {}", claude_response)
+                }
+            } else {
+                format!("Agent A: {}", claude_response)
+            };
+            
             updated_messages.push(ClaudeMessage {
                 role: "assistant".to_string(),
                 content: response.clone(),

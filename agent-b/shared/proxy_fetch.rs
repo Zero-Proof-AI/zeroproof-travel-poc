@@ -10,7 +10,7 @@
 //! # Examples
 //!
 //! ```rust,no_run
-//! use mcp_client::proxy_fetch::{ProxyFetch, ProxyConfig, ZkfetchToolOptions};
+//! use shared::proxy_fetch::{ProxyFetch, ProxyConfig, ZkfetchToolOptions};
 //! use serde_json::json;
 //!
 //! #[tokio::main]
@@ -56,6 +56,7 @@ use reqwest::{Client, RequestBuilder, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use crate::proof::CryptographicProof;
 
 /// Tool-specific ZK proof configuration for zkfetch-wrapper
 #[derive(Debug, Clone)]
@@ -207,6 +208,60 @@ pub fn redact_at_path(value: &mut Value, path: &str) {
     }
 }
 
+/// Configuration for attestation service proof submission
+///
+/// When enabled, ProxyFetch will automatically extract ZK proofs from zkfetch responses
+/// and submit them to the attestation service for storage and verification.
+#[derive(Debug, Clone)]
+pub struct AttestationConfig {
+    /// URL of the attestation service (e.g., 'http://localhost:3001')
+    pub service_url: String,
+
+    /// Whether to automatically submit proofs to the attestation service
+    pub enabled: bool,
+
+    /// Optional workflow stage identifier (e.g., "pricing", "payment", "booking")
+    /// If not provided, will be auto-inferred from the tool name
+    pub workflow_stage: Option<String>,
+
+    /// Unique session identifier for grouping related proofs
+    /// If not provided, one will be generated per request
+    pub session_id: Option<String>,
+}
+
+impl AttestationConfig {
+    /// Creates a new attestation config for automatic proof submission
+    pub fn new(service_url: String) -> Self {
+        Self {
+            service_url,
+            enabled: true,
+            workflow_stage: None,
+            session_id: None,
+        }
+    }
+
+    /// Creates an attestation config with a specific workflow stage
+    pub fn with_stage(service_url: String, workflow_stage: String) -> Self {
+        Self {
+            service_url,
+            enabled: true,
+            workflow_stage: Some(workflow_stage),
+            session_id: None,
+        }
+    }
+}
+
+impl Default for AttestationConfig {
+    fn default() -> Self {
+        Self {
+            service_url: "https://dev.attester.zeroproofai.com".to_string(),
+            enabled: true,
+            workflow_stage: Some("general".to_string()),
+            session_id: Some("00000000-0000-0000-0000-000000000000".to_string()),
+        }
+    }
+}
+
 /// Configuration for proxy server routing
 #[derive(Debug, Clone)]
 pub struct ProxyConfig {
@@ -230,6 +285,9 @@ pub struct ProxyConfig {
 
     /// Enable debug logging for proxy requests
     pub debug: bool,
+
+    /// Optional attestation service configuration for automatic proof submission
+    pub attestation_config: Option<AttestationConfig>,
 }
 
 impl Default for ProxyConfig {
@@ -242,6 +300,7 @@ impl Default for ProxyConfig {
             tool_options_map: None,
             default_zk_options: None,
             debug: false,
+            attestation_config: Some(AttestationConfig::default()),
         }
     }
 }
@@ -257,7 +316,7 @@ impl Default for ProxyConfig {
 /// # Construction
 ///
 /// ```rust,no_run
-/// use mcp_client::proxy_fetch::{ProxyFetch, ProxyConfig};
+/// use shared::proxy_fetch::{ProxyFetch, ProxyConfig};
 ///
 /// let config = ProxyConfig {
 ///     url: "http://proxy.example.com:8080".to_string(),
@@ -554,7 +613,116 @@ impl ProxyFetch {
             .send()
             .await?;
 
-        self.handle_response(response).await
+        let zkfetch_response = self.handle_response(response).await?;
+
+        // If attestation is configured, extract proof and submit it asynchronously
+        if let Some(attestation_config) = &self.config.attestation_config {
+            println!("[PROXY_FETCH] attestation_config is Some, enabled={}", attestation_config.enabled);
+            if attestation_config.enabled {
+                println!("[PROXY_FETCH] Submitting proof for tool: {:?}", tool_name);
+                self.submit_proof_async(
+                    zkfetch_response.clone(),
+                    tool_name.clone(),
+                    attestation_config.clone(),
+                    final_body.clone(),
+                    final_url.clone(),
+                ).await;
+                println!("[PROXY_FETCH] ✓ Spawn call completed for tool: {:?}", tool_name);
+            }
+        } else {
+            println!("[PROXY_FETCH] attestation_config is None!");
+        }
+
+        Ok(zkfetch_response)
+    }
+
+    /// Extracts proof from zkfetch response and submits it to attestation service asynchronously
+    async fn submit_proof_async(
+        &self,
+        zkfetch_response: Value,
+        tool_name: Option<String>,
+        attestation_config: AttestationConfig,
+        request_body: Value,
+        request_url: String,
+    ) {
+        let tool_name_str = tool_name.unwrap_or_else(|| "unknown-tool".to_string());
+        
+        println!("[PROXY_FETCH] zkfetch_response for {}: {}", tool_name_str, serde_json::to_string_pretty(&zkfetch_response).unwrap_or_default());
+        
+        // Extract proof from zkfetch response
+        // The proof is directly at response.proof, not response.proof.proof
+        let proof_value = zkfetch_response
+            .get("proof")
+            .cloned();
+
+        println!("[PROXY_FETCH] Extracted proof_value for {}: {:?}", tool_name_str, proof_value.is_some());
+        
+        if let Some(proof_json) = proof_value {
+            // Generate session ID if not provided
+            let session_id = attestation_config
+                .session_id
+                .clone()
+                .unwrap_or_else(|| {
+                    format!("agent-b-{}-{}", tool_name_str, chrono::Local::now().timestamp())
+                });
+
+            // Use provided workflow stage or default to "general"
+            let workflow_stage = attestation_config
+                .workflow_stage
+                .clone()
+                .or_else(|| Some("general".to_string()));
+
+            // Spawn background task to submit proof
+            let service_url = attestation_config.service_url.clone();
+            let tool_name_clone = tool_name_str.clone();
+            let response_body = zkfetch_response.clone();
+            
+            tokio::spawn(async move {
+                println!("[PROXY_FETCH] 🚀 Spawned task started for: {}", tool_name_clone);
+                // Create CryptographicProof structure
+                let crypto_proof = CryptographicProof {
+                    tool_name: tool_name_clone.clone(),
+                    timestamp: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs(),
+                    request: json!({
+                        "url": request_url,
+                        "body": request_body,
+                    }),
+                    response: response_body,
+                    proof: proof_json,
+                    proof_id: None,
+                    verified: false,
+                    onchain_compatible: false,
+                    display_response: None,
+                    redaction_metadata: None,
+                };
+
+                let client = reqwest::Client::new();
+                match crate::submit_proof_to_attestation_service(
+                    &client,
+                    &service_url,
+                    &session_id,
+                    &crypto_proof,
+                ).await {
+                    Ok(proof_id) => {
+                        tracing::info!(
+                            "[PROXY_FETCH] ✓ Proof submitted to attestation service for {}: {}",
+                            tool_name_clone, proof_id
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "[PROXY_FETCH] Failed to submit proof for {}: {}",
+                            tool_name_clone, e
+                        );
+                    }
+                }
+            });
+        } else {
+            tracing::warn!("[PROXY_FETCH] No proof received from zkfetch for tool: {}", tool_name_str);
+        }
     }
 
     /// Builds a request builder for the given URL and method

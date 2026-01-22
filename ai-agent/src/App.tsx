@@ -47,6 +47,9 @@ interface ChatMessage {
 }
 
 const ChatInterface: React.FC = () => {
+  // Log immediately on component render
+  console.log('[APP] ChatInterface component rendering');
+  
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -104,6 +107,10 @@ const ChatInterface: React.FC = () => {
   const wsUrl = baseUrl.replace('https://', 'wss://').replace('http://', 'ws://');
   const proofsApiUrl = `${baseUrl}/proofs`;
   const verifyProofUrl = `${baseUrl}/proofs/verify`;
+  
+  // Log configuration immediately
+  console.log('[APP] UI Agent Configuration:');
+  console.log('[APP]   Base URL (HTTP):', baseUrl);
 
   // WebSocket connection management
   const connectWebSocket = () => {
@@ -397,7 +404,7 @@ const ChatInterface: React.FC = () => {
     <div className="app-container" style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
       <header style={{ padding: '1rem', background: '#2d3748', color: '#fff', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div>
-          <h1>AI Agent Chat Interface</h1>
+          <h1>AI Travel Agent</h1>
           <p style={{ margin: '0.5rem 0 0 0', fontSize: '0.9rem', opacity: 0.8 }}>
             Ask about travel bookings, payments, and cryptographic proofs
           </p>

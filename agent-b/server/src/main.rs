@@ -26,6 +26,8 @@ struct PriceResponse {
     elf_hash: String,
 }
 
+use serde_json::Value;
+
 #[derive(Serialize)]
 struct BookResponse {
     // Agent-specific data
@@ -35,6 +37,9 @@ struct BookResponse {
     // ZK verification metadata
     program_id: String,
     elf_hash: String,
+    // Optional ZK proof from zkfetch
+    #[serde(skip_serializing_if = "Option::is_none")]
+    proof: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -43,6 +48,8 @@ struct BookRequest {
     to: String,
     passenger_name: String,
     passenger_email: String,
+    #[serde(default)]
+    session_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -72,35 +79,49 @@ async fn price_handler(
     })
 }
 
+async fn fallback_booking(req: &BookRequest) -> (booking::Response, Option<Value>) {
+    let core_req = booking::Request {
+        from: req.from.clone(),
+        to: req.to.clone(),
+        passenger_name: req.passenger_name.clone(),
+        passenger_email: req.passenger_email.clone(),
+    };
+    let zkfetch_url = std::env::var("ZKFETCH_WRAPPER_URL")
+        .unwrap_or_else(|_| "http://localhost:8003".to_string());
+    // Session_id must be provided - use what's passed or return empty response
+    match &req.session_id {
+        Some(session_id) => booking::handle_async(core_req, zkfetch_url, session_id).await,
+        None => {
+            // Return empty response if session_id not provided
+            eprintln!("[FALLBACK_BOOKING] Missing session_id in request");
+            (
+                booking::Response {
+                    booking_id: String::new(),
+                    status: "failed".to_string(),
+                    confirmation_code: String::new(),
+                },
+                None,
+            )
+        }
+    }
+}
+
 async fn book_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<BookRequest>,
 ) -> Json<BookResponse> {
-    // If BOOKING_API_URL is set, call the real API
-    let core_resp = if let Some(api_url) = &state.booking_api_url {
+    // If BOOKING_API_URL is set, try calling the real API with fallback
+    let (core_resp, proof) = if let Some(api_url) = &state.booking_api_url {
         match call_booking_api(api_url, &req).await {
-            Ok(resp) => resp,
+            Ok(resp) => (resp, None),
             Err(e) => {
                 eprintln!("⚠ Booking API call failed: {}, using fallback", e);
-                // Fallback to async booking logic
-                let core_req = booking::Request {
-                    from: req.from.clone(),
-                    to: req.to.clone(),
-                    passenger_name: req.passenger_name.clone(),
-                    passenger_email: req.passenger_email.clone(),
-                };
-                booking::handle_async(core_req).await
+                fallback_booking(&req).await
             }
         }
     } else {
-        // Use async booking logic
-        let core_req = booking::Request {
-            from: req.from,
-            to: req.to,
-            passenger_name: req.passenger_name,
-            passenger_email: req.passenger_email,
-        };
-        booking::handle_async(core_req).await
+        // Use fallback async booking logic directly
+        fallback_booking(&req).await
     };
 
     Json(BookResponse {
@@ -109,6 +130,7 @@ async fn book_handler(
         confirmation_code: core_resp.confirmation_code,
         program_id: state.program_id.clone(),
         elf_hash: state.elf_hash.clone(),
+        proof,
     })
 }
 

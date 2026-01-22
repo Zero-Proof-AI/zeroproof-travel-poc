@@ -5,7 +5,7 @@ use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use crate::orchestration::{AgentConfig, BookingState, ClaudeMessage};
-use crate::proxy_fetch::{ProxyConfig, ProxyFetch};
+use crate::shared::proxy_fetch::{ProxyConfig, ProxyFetch, AttestationConfig};
 use super::proof::CryptographicProof;
 use super::tool_map::build_tool_options_map;
 
@@ -76,8 +76,11 @@ When the user makes a request, analyze what tool(s) they need and provide a JSON
 
 TRAVEL & PRICING TOOLS (from Agent B MCP Server):
 - For ticket pricing: use get-ticket-price
-  - Requires: from, to, optional vip boolean
-  - IMPORTANT: When user asks to book, ONLY suggest this tool first. Do NOT suggest book-flight yet.
+  - Requires: from (departure city code), to (destination city code), optional vip boolean
+  - CRITICAL: Both 'from' AND 'to' must be provided by the user. If either is missing:
+    * Ask the user to provide the missing information
+    * Do NOT make up or assume a city code
+    * Example: if user says "Find a ticket to Paris", ask "What city are you departing from?"
 - For flight booking: use book-flight
   - Requires: from, to, passenger_name, passenger_email
   - IMPORTANT: Do NOT suggest this. The AI will call this automatically after payment completes.
@@ -107,7 +110,8 @@ IMPORTANT:
 - Only suggest tools that match the user's request
 - Always use sessionId format: sess_<username> or sess_<uuid>
 - For payment tools, use consumerId and enrollmentReferenceId from user context
-- If unsure what to do, ask the user for clarification{}"#,
+- If unsure what to do, ask the user for clarification
+- NEVER assume or make up missing information - always ask the user{}"#,
             tool_definitions.to_string(),
             state_context
         )
@@ -276,6 +280,7 @@ pub async fn call_tool_with_proof(
     zkfetch_wrapper_url: Option<&str>,
     tool_name: &str,
     arguments: Value,
+    attestation_config: Option<AttestationConfig>,
 ) -> Result<(String, Option<CryptographicProof>)> {
     use serde_json::json;
     
@@ -284,7 +289,8 @@ pub async fn call_tool_with_proof(
         println!("[TOOL] Calling {} via zkfetch-wrapper (PROXIED)", tool_name);
         
         // Create ProxyFetch with zkfetch config
-        let proxy_config = ProxyConfig {
+        // If attestation_config is provided, use it; otherwise let Default::default() kick in
+        let mut proxy_config = ProxyConfig {
             url: zkfetch_url.to_string(),
             proxy_type: "zkfetch".to_string(),
             username: None,
@@ -292,7 +298,13 @@ pub async fn call_tool_with_proof(
             tool_options_map: Some(build_tool_options_map()),
             default_zk_options: None,
             debug: std::env::var("DEBUG_PROXY_FETCH").is_ok(),
+            ..Default::default()  // Uses default attestation_config: Some(AttestationConfig::default())
         };
+        
+        // Override attestation_config if explicitly provided
+        if let Some(config) = attestation_config {
+            proxy_config.attestation_config = Some(config);
+        }
         
         let proxy_fetch = ProxyFetch::new(proxy_config)?;
         let target_url = format!("{}/tools/{}", server_url, tool_name);
@@ -406,6 +418,7 @@ pub async fn call_server_tool_with_proof(
     zkfetch_wrapper_url: Option<&str>,
     tool_name: &str,
     arguments: Value,
+    attestation_config: Option<AttestationConfig>,
 ) -> Result<(String, Option<CryptographicProof>)> {
     let agent_b_tools = [
         "get-ticket-price",
@@ -420,12 +433,12 @@ pub async fn call_server_tool_with_proof(
     
     if agent_b_tools.contains(&tool_name) {
         // Agent B tools - use zkfetch-wrapper if available to get proof
-        return call_tool_with_proof(client, agent_b_url, zkfetch_wrapper_url, tool_name, arguments).await;
+        return call_tool_with_proof(client, agent_b_url, zkfetch_wrapper_url, tool_name, arguments, attestation_config).await;
     }
     
     if payment_tools.contains(&tool_name) && payment_agent_url.is_some() {
         // Payment Agent tools - use zkfetch-wrapper if available to get proof
-        return call_tool_with_proof(client, payment_agent_url.unwrap(), zkfetch_wrapper_url, tool_name, arguments).await;
+        return call_tool_with_proof(client, payment_agent_url.unwrap(), zkfetch_wrapper_url, tool_name, arguments, attestation_config).await;
     }
     
     // For non-Agent-B tools, use direct calls (backward compatibility)

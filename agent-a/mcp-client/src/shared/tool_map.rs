@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use serde_json::json;
-use crate::proxy_fetch::{ZkfetchToolOptions, ToolOptionsMap};
+use crate::shared::proxy_fetch::{ZkfetchToolOptions, ToolOptionsMap};
 
 /// Build a map of tool-specific redaction rules for privacy-preserving proofs
 /// 

@@ -9,17 +9,16 @@ use anyhow::Result;
 use axum::{
     extract::Json,
     http::StatusCode,
-    response::IntoResponse,
     routing::{get, post},
     Router,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
-use std::sync::Arc;
+use serde_json::json;
 use tower_http::cors::CorsLayer;
 
 use pricing_core::pricing;
 use pricing_core::booking;
+use shared::proof::CryptographicProof;
 
 /// Pricing Tool Request
 #[derive(Debug, Deserialize)]
@@ -46,6 +45,8 @@ struct BookRequest {
     to: String,
     passenger_name: String,
     passenger_email: String,
+    #[serde(default)]
+    session_id: Option<String>,
 }
 
 /// Booking Tool Response
@@ -64,7 +65,8 @@ struct BookResponse {
 struct ToolDefinition {
     name: String,
     description: String,
-    inputSchema: serde_json::Value,
+    #[serde(rename = "inputSchema")]
+    input_schema: serde_json::Value,
 }
 
 /// Tools List Response
@@ -112,7 +114,7 @@ async fn list_tools() -> Json<ToolsResponse> {
             ToolDefinition {
                 name: "get-ticket-price".to_string(),
                 description: "Get flight ticket pricing based on route and passenger tier".to_string(),
-                inputSchema: json!({
+                input_schema: json!({
                     "type": "object",
                     "properties": {
                         "from": {
@@ -134,7 +136,7 @@ async fn list_tools() -> Json<ToolsResponse> {
             ToolDefinition {
                 name: "book-flight".to_string(),
                 description: "Book a flight and generate confirmation".to_string(),
-                inputSchema: json!({
+                input_schema: json!({
                     "type": "object",
                     "properties": {
                         "from": {
@@ -167,13 +169,33 @@ async fn get_ticket_price(
 ) -> Result<Json<ToolResponse<PriceResponse>>, (StatusCode, Json<ToolResponse<()>>)> {
     tracing::info!("[GET-TICKET-PRICE] Tool call received: from={}, to={}, vip={:?}", req.from, req.to, req.vip);
     
-    // Validate input
-    if req.from.is_empty() || req.to.is_empty() {
-        tracing::warn!("[GET-TICKET-PRICE] Validation failed: missing required fields");
+    // Validate input with specific error messages
+    if req.from.is_empty() && req.to.is_empty() {
+        tracing::warn!("[GET-TICKET-PRICE] Validation failed: both departure and destination are missing");
         return Err((
             StatusCode::BAD_REQUEST,
             Json(tool_error(
-                "from and to fields are required".to_string(),
+                "Missing required fields: 'from' (departure city) and 'to' (destination city) are both required".to_string(),
+            )),
+        ));
+    }
+    
+    if req.from.is_empty() {
+        tracing::warn!("[GET-TICKET-PRICE] Validation failed: departure city is missing");
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(tool_error(
+                "Missing required field: 'from' (departure city code, e.g., NYC, LON, LAX)".to_string(),
+            )),
+        ));
+    }
+    
+    if req.to.is_empty() {
+        tracing::warn!("[GET-TICKET-PRICE] Validation failed: destination city is missing");
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(tool_error(
+                "Missing required field: 'to' (destination city code, e.g., NYC, LON, LAX)".to_string(),
             )),
         ));
     }
@@ -204,18 +226,49 @@ async fn book_flight(
 ) -> Result<Json<ToolResponse<BookResponse>>, (StatusCode, Json<ToolResponse<()>>)> {
     tracing::info!("[BOOK-FLIGHT] Tool call received: from={}, to={}, passenger={}, email={}", req.from, req.to, req.passenger_name, req.passenger_email);
     
-    // Validate input
-    if req.from.is_empty() || req.to.is_empty() || req.passenger_name.is_empty() {
-        tracing::warn!("[BOOK-FLIGHT] Validation failed: missing required fields");
+    // Validate input with specific error messages
+    let mut missing_fields = Vec::new();
+    
+    if req.from.is_empty() {
+        missing_fields.push("'from' (departure city code, e.g., NYC)");
+    }
+    if req.to.is_empty() {
+        missing_fields.push("'to' (destination city code, e.g., LON)");
+    }
+    if req.passenger_name.is_empty() {
+        missing_fields.push("'passenger_name' (full name of passenger)");
+    }
+    if req.passenger_email.is_empty() {
+        missing_fields.push("'passenger_email' (email address)");
+    }
+    
+    if !missing_fields.is_empty() {
+        let error_msg = format!(
+            "Missing required field(s): {}",
+            missing_fields.join(", ")
+        );
+        tracing::warn!("[BOOK-FLIGHT] Validation failed: {}", error_msg);
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(tool_error(
-                "from, to, and passenger_name are required".to_string(),
-            )),
+            Json(tool_error(error_msg)),
         ));
     }
 
-    // Use pricing-core to generate booking (async version that calls httpbin.org)
+    // Get zkfetch URL from environment
+    let zkfetch_url = std::env::var("ZKFETCH_WRAPPER_URL")
+        .unwrap_or_else(|_| "http://localhost:8003".to_string());
+
+    // Session_id must be provided by agent-a for proof tracking across the workflow
+    let session_id = req.session_id.clone()
+        .ok_or_else(|| {
+            tracing::warn!("[BOOK-FLIGHT] Missing required field: session_id");
+            (
+                StatusCode::BAD_REQUEST,
+                Json(tool_error("Missing required field: 'session_id' (must be provided by orchestrator)".to_string())),
+            )
+        })?;
+
+    // Delegate to pricing-core library handle_async for business logic
     let core_req = booking::Request {
         from: req.from.clone(),
         to: req.to.clone(),
@@ -223,14 +276,87 @@ async fn book_flight(
         passenger_email: req.passenger_email.clone(),
     };
 
-    let core_resp = booking::handle_async(core_req).await;
-    
-    tracing::info!("[BOOK-FLIGHT] result: booking_id={}, confirmation_code={}, status={}", core_resp.booking_id, core_resp.confirmation_code, core_resp.status);
+    let (response, proof_value) = booking::handle_async(core_req, zkfetch_url, &session_id).await;
+
+    tracing::info!("[BOOK-FLIGHT] result: booking_id={}, confirmation_code={}, status={}", response.booking_id, response.confirmation_code, response.status);
+
+    // If we received a proof, submit it to the attestation service asynchronously
+    if let Some(proof_json) = proof_value {
+        
+        // Clone values needed for async task
+        let response_clone = BookResponse {
+            booking_id: response.booking_id.clone(),
+            status: response.status.clone(),
+            confirmation_code: response.confirmation_code.clone(),
+            from: req.from.clone(),
+            to: req.to.clone(),
+            passenger_name: req.passenger_name.clone(),
+        };
+        
+        let req_clone = BookRequest {
+            from: req.from.clone(),
+            to: req.to.clone(),
+            passenger_name: req.passenger_name.clone(),
+            passenger_email: req.passenger_email.clone(),
+            session_id: req.session_id.clone(),
+        };
+        
+        tokio::spawn(async move {
+            // Create CryptographicProof structure from the zkfetch proof
+            let crypto_proof = CryptographicProof {
+                tool_name: "book-flight".to_string(),
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+                request: serde_json::json!({
+                    "from": req_clone.from,
+                    "to": req_clone.to,
+                    "passenger_name": req_clone.passenger_name,
+                    "passenger_email": req_clone.passenger_email,
+                }),
+                response: serde_json::json!({
+                    "booking_id": response_clone.booking_id,
+                    "status": response_clone.status,
+                    "confirmation_code": response_clone.confirmation_code,
+                }),
+                proof: proof_json,
+                proof_id: None,
+                verified: false,
+                onchain_compatible: false,
+                display_response: None,
+                redaction_metadata: None,
+            };
+
+            // Get attestation service URL from environment
+            let attestation_service_url = std::env::var("ATTESTATION_SERVICE_URL")
+                .unwrap_or_else(|_| "http://localhost:3001".to_string());
+            
+            match shared::submit_proof(
+                &attestation_service_url,
+                &session_id,
+                &crypto_proof,
+                None,  // sequence
+                None,  // related_proof_id
+                Some("booking".to_string()),  // workflow_stage
+                None,  // progress_tx
+            ).await {
+                Ok(proof_id) => {
+                    tracing::info!("[BOOK-FLIGHT] ✓ Proof submitted to attestation service: {}", proof_id);
+                }
+                Err(e) => {
+                    tracing::warn!("[BOOK-FLIGHT] Failed to submit proof: {}", e);
+                }
+            }
+        });
+    } else {
+        tracing::warn!("[BOOK-FLIGHT] No proof received from booking operation");
+    }
 
     Ok(Json(ToolResponse::ok(BookResponse {
-        booking_id: core_resp.booking_id,
-        status: core_resp.status,
-        confirmation_code: core_resp.confirmation_code,
+        booking_id: response.booking_id,
+        status: response.status,
+        confirmation_code: response.confirmation_code,
         from: req.from,
         to: req.to,
         passenger_name: req.passenger_name,
@@ -239,6 +365,9 @@ async fn book_flight(
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Load environment variables from .env file
+    dotenv::dotenv().ok();
+
     // Initialize logging
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
@@ -270,6 +399,11 @@ async fn main() -> Result<()> {
     println!("  GET  /tools                     — List all tools");
     println!("  POST /tools/get-ticket-price    — Get flight pricing");
     println!("  POST /tools/book-flight         — Book a flight\n");
+
+    // Print zkfetch endpoint configuration
+    let zkfetch_url = std::env::var("ZKFETCH_WRAPPER_URL")
+        .unwrap_or_else(|_| "http://localhost:8003".to_string());
+    println!("🔐 zkfetch Endpoint: {}/zkfetch\n", zkfetch_url);
 
     axum::serve(listener, app).await?;
 

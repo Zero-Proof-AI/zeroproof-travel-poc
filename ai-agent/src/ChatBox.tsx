@@ -30,10 +30,12 @@ const ChatBox: React.FC<ChatBoxProps> = ({ messages, loading, messagesEndRef }) 
             color: '#718096',
           }}
         >
-          <h2>Welcome to AI Agent Chat</h2>
+          <h2>Looking for your next adventure? Go no further!</h2>
           <p>Start a conversation to get started</p>
-          <p style={{ fontSize: '0.9rem', marginTop: '1rem' }}>
-            This interface collects cryptographic proofs of all Agent-B calls for on-chain verification
+          <p style={{ fontSize: '0.9rem', color: '#0dc39f', marginTop: '1rem' }}>
+            <strong >
+              Never lose money from an agentic transaction.
+            </strong>
           </p>
         </div>
       )}

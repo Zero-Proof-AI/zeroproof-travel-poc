@@ -4,7 +4,7 @@
 use anyhow::{Result, anyhow};
 use serde_json::{json, Value};
 use crate::orchestration::{AgentConfig, BookingState};
-use crate::shared::{call_server_tool, call_server_tool_with_proof, submit_proof_to_database_with_progress};
+use crate::shared::{call_server_tool, call_server_tool_with_proof, AttestationConfig};
 use regex::Regex;
 
 /// Parse and verify enroll-card response
@@ -100,6 +100,14 @@ pub async fn enroll_card_if_needed(
         // with sessionId to find and verify proofs autonomously.
         // This prevents Agent-A from dictating which proof to verify.
 
+        // Create attestation config with the correct session_id
+        let attestation_config = Some(AttestationConfig {
+            service_url: "https://dev.attester.zeroproofai.com".to_string(),
+            enabled: true,
+            workflow_stage: Some("payment_enrollment".to_string()),
+            session_id: Some(session_id.to_string()),
+        });
+
         match call_server_tool_with_proof(
             &client,
             &config.server_url,
@@ -108,30 +116,27 @@ pub async fn enroll_card_if_needed(
             zkfetch_wrapper_url,
             "enroll-card",
             enroll_args,
+            attestation_config,  // Pass the config with correct session_id
         )
         .await
         {
             Ok((result, proof)) => {
-                // Collect and submit cryptographic proof if available
+                // Collect cryptographic proof if available
                 if let Some(crypto_proof) = proof {
                     state.cryptographic_traces.push(crypto_proof.clone());
                     println!("[PROOF] Collected proof for enroll-card: {}", state.cryptographic_traces.len());
                     
-                    // Submit proof to agent-a database asynchronously with progress channel
-                    let server_url = config.server_url.clone();
-                    let session_id_db = session_id.to_string();
-                    let crypto_proof_db = crypto_proof.clone();
-                    let progress_tx_db = progress_tx.clone();
-                    tokio::spawn(async move {
-                        match submit_proof_to_database_with_progress(&server_url, &session_id_db, &crypto_proof_db, None, None, None, progress_tx_db).await {
-                            Ok(proof_id) => {
-                                println!("[PROOF] Submitted proof to agent-a database: {}", proof_id);
-                            }
-                            Err(e) => {
-                                eprintln!("[PROOF] Failed to submit proof to agent-a database: {}", e);
-                            }
-                        }
-                    });
+                    // Send proof to UI via progress channel
+                    if let Some(tx) = &progress_tx {
+                        let proof_msg = serde_json::json!({
+                            "tool_name": crypto_proof.tool_name,
+                            "timestamp": crypto_proof.timestamp,
+                            "verified": crypto_proof.verified,
+                            "onchain_compatible": crypto_proof.onchain_compatible,
+                        });
+                        let _ = tx.send(format!("__PROOF__{}", proof_msg.to_string())).await;
+                    }
+                    // Proof submission is now handled automatically by ProxyFetch via attestation_config
                 }
 
                 match parse_enroll_card_response(&result) {

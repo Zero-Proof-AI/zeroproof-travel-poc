@@ -1,4 +1,4 @@
-#![no_std]   // Required: must work inside SP1 too
+#![cfg_attr(not(feature = "http"), no_std)]   // No-std for SP1; std when "http" feature enabled
 
 extern crate alloc;
 use alloc::string::String;
