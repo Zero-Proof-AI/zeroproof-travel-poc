@@ -105,6 +105,7 @@ pub async fn handle_async(req: Request, zkfetch_url: String, session_id: &str) -
             enabled: true,  // Enable attestation for airline confirmation proofs
             workflow_stage: Some("airline_confirmation".to_string()),
             session_id: Some(session_id.to_string()),
+            submitted_by: "agent-b".to_string(),
         }),
     };
 

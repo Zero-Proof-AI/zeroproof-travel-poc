@@ -227,6 +227,9 @@ pub struct AttestationConfig {
     /// Unique session identifier for grouping related proofs
     /// If not provided, one will be generated per request
     pub session_id: Option<String>,
+
+    /// Agent identifier for proof submission attribution (e.g., "agent-a" or "agent-b")
+    pub submitted_by: String,
 }
 
 impl AttestationConfig {
@@ -237,6 +240,7 @@ impl AttestationConfig {
             enabled: true,
             workflow_stage: None,
             session_id: None,
+            submitted_by: "unknown-agent".to_string(),
         }
     }
 
@@ -247,6 +251,7 @@ impl AttestationConfig {
             enabled: true,
             workflow_stage: Some(workflow_stage),
             session_id: None,
+            submitted_by: "unknown-agent".to_string(),
         }
     }
 }
@@ -258,6 +263,7 @@ impl Default for AttestationConfig {
             enabled: true,
             workflow_stage: Some("general".to_string()),
             session_id: Some("00000000-0000-0000-0000-000000000000".to_string()),
+            submitted_by: "unknown-agent".to_string(),
         }
     }
 }
@@ -700,11 +706,13 @@ impl ProxyFetch {
                 };
 
                 let client = reqwest::Client::new();
-                match crate::submit_proof_to_attestation_service(
+                match crate::submit_proof(
                     &client,
                     &service_url,
                     &session_id,
                     &crypto_proof,
+                    workflow_stage,
+                    &attestation_config.submitted_by,
                 ).await {
                     Ok(proof_id) => {
                         tracing::info!(

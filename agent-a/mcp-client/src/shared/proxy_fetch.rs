@@ -56,6 +56,7 @@ use reqwest::{Client, RequestBuilder, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use crate::shared::proof::CryptographicProof;
 
 /// Tool-specific ZK proof configuration for zkfetch-wrapper
 #[derive(Debug, Clone)]
@@ -226,6 +227,9 @@ pub struct AttestationConfig {
     /// Unique session identifier for grouping related proofs
     /// If not provided, one will be generated per request
     pub session_id: Option<String>,
+
+    /// Agent identifier for proof submission attribution (e.g., "agent-a" or "agent-b")
+    pub submitted_by: String,
 }
 
 impl AttestationConfig {
@@ -236,6 +240,7 @@ impl AttestationConfig {
             enabled: true,
             workflow_stage: None,
             session_id: None,
+            submitted_by: "unknown-agent".to_string(),
         }
     }
 
@@ -246,6 +251,7 @@ impl AttestationConfig {
             enabled: true,
             workflow_stage: Some(workflow_stage),
             session_id: None,
+            submitted_by: "unknown-agent".to_string(),
         }
     }
 }
@@ -257,6 +263,7 @@ impl Default for AttestationConfig {
             enabled: true,
             workflow_stage: Some("general".to_string()),
             session_id: Some("00000000-0000-0000-0000-000000000000".to_string()),
+            submitted_by: "unknown-agent".to_string(),
         }
     }
 }
@@ -679,7 +686,7 @@ impl ProxyFetch {
             tokio::spawn(async move {
                 println!("[PROXY_FETCH] 🚀 Spawned task started for: {}", tool_name_clone);
                 // Create CryptographicProof structure
-                let crypto_proof = crate::shared::proof::CryptographicProof {
+                let crypto_proof = CryptographicProof {
                     tool_name: tool_name_clone.clone(),
                     timestamp: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -699,11 +706,13 @@ impl ProxyFetch {
                 };
 
                 let client = reqwest::Client::new();
-                match crate::shared::submit_proof_to_attestation_service(
+                match crate::shared::submit_proof(
                     &client,
                     &service_url,
                     &session_id,
                     &crypto_proof,
+                    workflow_stage,
+                    &attestation_config.submitted_by,
                 ).await {
                     Ok(proof_id) => {
                         tracing::info!(

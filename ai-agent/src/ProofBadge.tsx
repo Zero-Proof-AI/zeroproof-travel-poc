@@ -9,6 +9,7 @@ interface CryptographicProof {
   sequence?: number;
   related_proof_id?: string;
   workflow_stage?: string;
+  submitted_by?: string;
 }
 
 interface ProofBadgeProps {
@@ -123,6 +124,11 @@ const ProofBadge = React.memo(
                 >
                   {proof.workflow_stage}
                 </span>
+              </div>
+            )}
+            {proof.submitted_by && (
+              <div style={{ marginTop: '0.25rem', color: '#4a5568' }}>
+                <strong>Submitted By:</strong> {proof.submitted_by}
               </div>
             )}
             {!isExpanded && proof.proof_id && (
@@ -296,6 +302,23 @@ const ProofBadge = React.memo(
                     }}
                   >
                     {proof.workflow_stage}
+                  </div>
+                </div>
+              )}
+
+              {proof.submitted_by && (
+                <div style={{ marginBottom: '0.5rem' }}>
+                  <strong style={{ color: '#2d3748' }}>Submitted By:</strong>
+                  <div
+                    style={{
+                      marginTop: '0.25rem',
+                      color: '#4a5568',
+                      background: '#fff',
+                      padding: '0.35rem',
+                      borderRadius: '0.25rem',
+                    }}
+                  >
+                    {proof.submitted_by}
                   </div>
                 </div>
               )}

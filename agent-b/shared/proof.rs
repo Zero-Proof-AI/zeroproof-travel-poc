@@ -48,11 +48,13 @@ pub struct CryptographicProof {
 }
 
 /// Submit a proof to zk-attestation-service for independent verification
-pub async fn submit_proof_to_attestation_service(
+pub async fn submit_proof(
     client: &reqwest::Client,
     attestation_service_url: &str,
     session_id: &str,
     proof: &CryptographicProof,
+    workflow_stage: Option<String>,
+    submitted_by: &str,
 ) -> Result<String> {
     let submit_url = format!("{}/proofs/submit", attestation_service_url);
     
@@ -65,8 +67,8 @@ pub async fn submit_proof_to_attestation_service(
         "proof": proof.proof,
         "verified": proof.verified,
         "onchain_compatible": proof.onchain_compatible,
-        "submitted_by": "agent-a",
-        "workflow_stage": "pricing",
+        "submitted_by": submitted_by,
+        "workflow_stage": workflow_stage.or_else(|| Some("general".to_string())),
         "display_response": proof.display_response,
         "redaction_metadata": proof.redaction_metadata,
     });
@@ -112,114 +114,4 @@ pub async fn submit_proof_to_attestation_service(
     }
 }
 
-/// Submit a cryptographic proof to the Agent-A proof database with workflow metadata
-/// 
-/// # Arguments
-/// * `server_url` - URL of the proof database server
-/// * `session_id` - Unique session identifier for grouping related proofs
-/// * `proof` - The cryptographic proof to submit
-/// * `sequence` - Optional sequence number for ordering proofs in workflow
-/// * `related_proof_id` - Optional ID of related proof for linking
-/// * `workflow_stage` - Optional workflow stage (e.g., "pricing", "payment", "booking").
-///                      If not provided, will be inferred from tool_name
-/// * `progress_tx` - Optional channel for sending real-time progress updates to UI
-///
-/// # Examples
-/// ```rust,no_run
-/// // Simple submission (all optional params as None)
-/// submit_proof(
-///     "http://localhost:3001",
-///     "session-123",
-///     &proof,
-///     None, None, None, None
-/// ).await?;
-///
-/// // With workflow stage
-/// submit_proof(
-///     "http://localhost:3001",
-///     "session-123",
-///     &proof,
-///     None, None, Some("booking".to_string()), None
-/// ).await?;
-/// ```
-pub async fn submit_proof(
-    server_url: &str,
-    session_id: &str,
-    proof: &CryptographicProof,
-    sequence: Option<u32>,
-    related_proof_id: Option<String>,
-    workflow_stage: Option<String>,
-    progress_tx: Option<tokio::sync::mpsc::Sender<String>>,
-) -> Result<String> {
-    let client = reqwest::Client::new();
-    let url = format!("{}/proofs", server_url);
-    
-    // Infer workflow_stage from tool_name if not provided
-    let inferred_stage = workflow_stage.or_else(|| {
-        match proof.tool_name.as_str() {
-            "get-ticket-price" | "get-flight-options" => Some("pricing".to_string()),
-            "enroll-card" => Some("payment_enrollment".to_string()),
-            "create-payment-instruction" | "pay-for-ticket" => Some("payment".to_string()),
-            "book-flight" => Some("booking".to_string()),
-            _ => None,
-        }
-    });
-    
-    let mut payload = json!({
-        "session_id": session_id,
-        "tool_name": proof.tool_name,
-        "timestamp": proof.timestamp,
-        "request": proof.request,
-        "response": proof.response,
-        "proof": proof.proof,
-        "proof_id": proof.proof_id,
-        "verified": proof.verified,
-        "onchain_compatible": proof.onchain_compatible,
-        "submitted_by": "agent-a"
-    });
-    
-    // Add optional workflow metadata
-    if let Some(seq) = sequence {
-        payload["sequence"] = json!(seq);
-    }
-    if let Some(ref rel_id) = related_proof_id {
-        payload["related_proof_id"] = json!(rel_id);
-    }
-    if let Some(ref stage) = inferred_stage {
-        payload["workflow_stage"] = json!(stage);
-    }
-    
-    let response = client
-        .post(&url)
-        .json(&payload)
-        .send()
-        .await?;
-    
-    if !response.status().is_success() {
-        let error_text = response.text().await?;
-        return Err(anyhow!("Failed to submit proof: {}", error_text));
-    }
-    
-    let result: Value = response.json().await?;
-    
-    if let Some(proof_id) = result.get("proof_id").and_then(|p| p.as_str()) {
-        println!("[PROOF] ✓ Proof submitted to database: {}", proof_id);
-        
-        // Send proof to UI via WebSocket if progress channel is available
-        if let Some(tx) = progress_tx {
-            let proof_msg = json!({
-                "tool_name": proof.tool_name,
-                "proof_id": proof_id,
-                "timestamp": proof.timestamp,
-                "verified": proof.verified,
-                "onchain_compatible": proof.onchain_compatible,
-            });
-            let _ = tx.send(format!("__PROOF__{}", proof_msg.to_string())).await;
-            println!("[PROOF] ✓ Proof sent to UI via WebSocket");
-        }
-        
-        Ok(proof_id.to_string())
-    } else {
-        Err(anyhow!("Invalid proof submission response"))
-    }
-}
+

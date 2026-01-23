@@ -15,6 +15,7 @@ interface CryptographicProof {
   sequence?: number;
   related_proof_id?: string;
   workflow_stage?: string;
+  submitted_by?: string;
 }
 
 interface FullProofData {
@@ -100,9 +101,9 @@ const ChatInterface: React.FC = () => {
   
   
   // Local environment
-  // const baseUrl = 'http://localhost:3001';
+  const baseUrl = 'http://localhost:3001';
   // Test Environment
-  const baseUrl = 'https://dev.agenta.zeroproofai.com';
+  // const baseUrl = 'https://dev.agenta.zeroproofai.com';
  
   const wsUrl = baseUrl.replace('https://', 'wss://').replace('http://', 'ws://');
   const proofsApiUrl = `${baseUrl}/proofs`;
@@ -328,18 +329,37 @@ const ChatInterface: React.FC = () => {
   const fetchFullProof = useCallback(async (proofId: string) => {
     setProofModalLoading(true);
     try {
-      const response = await axios.get(`${verifyProofUrl}/${proofId}`);
-      if (response.data.success && response.data.proof) {
-        setSelectedProof(response.data.proof);
+      // First, try to find the proof in the local proofs array
+      const localProof = proofs.find(p => p.proof_id === proofId);
+      
+      if (localProof && 'request' in localProof && 'response' in localProof && 'proof' in localProof) {
+        // We have a complete proof with all data in the local array
+        setSelectedProof(localProof as FullProofData);
         setProofModalOpen(true);
+      } else {
+        // Fallback: try to fetch from API if not in local array
+        const response = await axios.get(`${verifyProofUrl}/${proofId}`);
+        if (response.data.success && response.data.proof) {
+          setSelectedProof(response.data.proof);
+          setProofModalOpen(true);
+        } else {
+          alert('Proof data not found');
+        }
       }
     } catch (error) {
       console.error('Error fetching full proof:', error);
-      alert('Failed to fetch proof details');
+      // Check if the proof is in local array one more time
+      const localProof = proofs.find(p => p.proof_id === proofId);
+      if (localProof && 'request' in localProof && 'response' in localProof && 'proof' in localProof) {
+        setSelectedProof(localProof as FullProofData);
+        setProofModalOpen(true);
+      } else {
+        alert('Failed to fetch proof details');
+      }
     } finally {
       setProofModalLoading(false);
     }
-  }, [verifyProofUrl]);
+  }, [verifyProofUrl, proofs]);
 
   // Poll for proofs every 2 seconds when showing proofs (using automatic fetch, no loading state)
   // React.useEffect(() => {

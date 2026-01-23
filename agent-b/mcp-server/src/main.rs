@@ -18,7 +18,6 @@ use tower_http::cors::CorsLayer;
 
 use pricing_core::pricing;
 use pricing_core::booking;
-use shared::proof::CryptographicProof;
 
 /// Pricing Tool Request
 #[derive(Debug, Deserialize)]
@@ -36,6 +35,8 @@ struct PriceResponse {
     to: String,
     vip: bool,
     currency: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    proof: Option<serde_json::Value>,
 }
 
 /// Booking Tool Request
@@ -58,6 +59,8 @@ struct BookResponse {
     from: String,
     to: String,
     passenger_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    proof: Option<serde_json::Value>,
 }
 
 /// Tool Definition
@@ -217,6 +220,7 @@ async fn get_ticket_price(
         to: req.to,
         vip: req.vip.unwrap_or(false),
         currency: "USD".to_string(),
+        proof: None,  // Pricing is a deterministic calculation, no proof generated
     })))
 }
 
@@ -276,83 +280,13 @@ async fn book_flight(
         passenger_email: req.passenger_email.clone(),
     };
 
-    let (response, proof_value) = booking::handle_async(core_req, zkfetch_url, &session_id).await;
+    let (response, proof) = booking::handle_async(core_req, zkfetch_url, &session_id).await;
 
     tracing::info!("[BOOK-FLIGHT] result: booking_id={}, confirmation_code={}, status={}", response.booking_id, response.confirmation_code, response.status);
 
-    // If we received a proof, submit it to the attestation service asynchronously
-    if let Some(proof_json) = proof_value {
-        
-        // Clone values needed for async task
-        let response_clone = BookResponse {
-            booking_id: response.booking_id.clone(),
-            status: response.status.clone(),
-            confirmation_code: response.confirmation_code.clone(),
-            from: req.from.clone(),
-            to: req.to.clone(),
-            passenger_name: req.passenger_name.clone(),
-        };
-        
-        let req_clone = BookRequest {
-            from: req.from.clone(),
-            to: req.to.clone(),
-            passenger_name: req.passenger_name.clone(),
-            passenger_email: req.passenger_email.clone(),
-            session_id: req.session_id.clone(),
-        };
-        
-        tokio::spawn(async move {
-            // Create CryptographicProof structure from the zkfetch proof
-            let crypto_proof = CryptographicProof {
-                tool_name: "book-flight".to_string(),
-                timestamp: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs(),
-                request: serde_json::json!({
-                    "from": req_clone.from,
-                    "to": req_clone.to,
-                    "passenger_name": req_clone.passenger_name,
-                    "passenger_email": req_clone.passenger_email,
-                }),
-                response: serde_json::json!({
-                    "booking_id": response_clone.booking_id,
-                    "status": response_clone.status,
-                    "confirmation_code": response_clone.confirmation_code,
-                }),
-                proof: proof_json,
-                proof_id: None,
-                verified: false,
-                onchain_compatible: false,
-                display_response: None,
-                redaction_metadata: None,
-            };
-
-            // Get attestation service URL from environment
-            let attestation_service_url = std::env::var("ATTESTATION_SERVICE_URL")
-                .unwrap_or_else(|_| "http://localhost:3001".to_string());
-            
-            match shared::submit_proof(
-                &attestation_service_url,
-                &session_id,
-                &crypto_proof,
-                None,  // sequence
-                None,  // related_proof_id
-                Some("booking".to_string()),  // workflow_stage
-                None,  // progress_tx
-            ).await {
-                Ok(proof_id) => {
-                    tracing::info!("[BOOK-FLIGHT] ✓ Proof submitted to attestation service: {}", proof_id);
-                }
-                Err(e) => {
-                    tracing::warn!("[BOOK-FLIGHT] Failed to submit proof: {}", e);
-                }
-            }
-        });
-    } else {
-        tracing::warn!("[BOOK-FLIGHT] No proof received from booking operation");
-    }
-
+    // NOTE: Proof is automatically submitted by proxy_fetch's submit_proof_async()
+    // when the attestation_config is enabled in the ProxyConfig
+    
     Ok(Json(ToolResponse::ok(BookResponse {
         booking_id: response.booking_id,
         status: response.status,
@@ -360,6 +294,7 @@ async fn book_flight(
         from: req.from,
         to: req.to,
         passenger_name: req.passenger_name,
+        proof,
     })))
 }
 

@@ -106,6 +106,7 @@ pub async fn enroll_card_if_needed(
             enabled: true,
             workflow_stage: Some("payment_enrollment".to_string()),
             session_id: Some(session_id.to_string()),
+            submitted_by: "agent-a".to_string(),
         });
 
         match call_server_tool_with_proof(
@@ -116,7 +117,7 @@ pub async fn enroll_card_if_needed(
             zkfetch_wrapper_url,
             "enroll-card",
             enroll_args,
-            attestation_config,  // Pass the config with correct session_id
+            attestation_config.clone(),  // Pass the config with correct session_id
         )
         .await
         {
@@ -126,14 +127,28 @@ pub async fn enroll_card_if_needed(
                     state.cryptographic_traces.push(crypto_proof.clone());
                     println!("[PROOF] Collected proof for enroll-card: {}", state.cryptographic_traces.len());
                     
-                    // Send proof to UI via progress channel
+                    // Send proof to UI via progress channel with all available metadata
                     if let Some(tx) = &progress_tx {
-                        let proof_msg = serde_json::json!({
+                        let mut proof_msg = serde_json::json!({
                             "tool_name": crypto_proof.tool_name,
                             "timestamp": crypto_proof.timestamp,
                             "verified": crypto_proof.verified,
                             "onchain_compatible": crypto_proof.onchain_compatible,
+                            "proof_id": format!("{}_{}", session_id, crypto_proof.timestamp),
+                            "request": crypto_proof.request,
+                            "response": crypto_proof.response,
+                            "proof": crypto_proof.proof,
+                            "session_id": session_id,
                         });
+                        
+                        // Add workflow_stage and submitted_by from attestation config
+                        if let Some(config_ref) = &attestation_config {
+                            if let Some(stage) = &config_ref.workflow_stage {
+                                proof_msg["workflow_stage"] = serde_json::json!(stage);
+                            }
+                            proof_msg["submitted_by"] = serde_json::json!(&config_ref.submitted_by);
+                        }
+                        
                         let _ = tx.send(format!("__PROOF__{}", proof_msg.to_string())).await;
                     }
                     // Proof submission is now handled automatically by ProxyFetch via attestation_config
