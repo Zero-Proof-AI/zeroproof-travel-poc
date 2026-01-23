@@ -58,9 +58,20 @@ export const ProofsProvider: React.FC<ProofsProviderProps> = ({
     const ws = new WebSocket(`${wsUrl}/ws/proofs?sessionId=${sessionId}`);
 
     ws.onopen = () => {
-      console.log('[PROOFS_CONTEXT] Connected to proofs endpoint');
+      console.log('[PROOFS_CONTEXT] ✅ Connected to proofs endpoint');
       setLoading(false);
       setError(null);
+    };
+
+    ws.onerror = (error) => {
+      console.error('[PROOFS_CONTEXT] ❌ WebSocket error:', error);
+      setError('Failed to connect to proofs service');
+      setLoading(false);
+    };
+
+    ws.onclose = (event) => {
+      console.warn('[PROOFS_CONTEXT] 🔌 WebSocket closed. Code:', event.code, 'Reason:', event.reason);
+      setLoading(false);
     };
 
     ws.onmessage = (event) => {

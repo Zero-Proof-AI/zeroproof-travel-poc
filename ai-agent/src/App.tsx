@@ -214,7 +214,7 @@ const ChatInterface: React.FC = () => {
   // const attestationServiceUrl = 'http://localhost:8000'; // Attestation service endpoint
   // Test Environment
   const baseUrl = 'https://dev.agenta.zeroproofai.com';
-  const attestationServiceUrl = 'https://attestation.zeroproofai.com';
+  const attestationServiceUrl = 'https://dev.attester.zeroproofai.com';
 
   const wsUrl = baseUrl.replace('https://', 'wss://').replace('http://', 'ws://');
 
