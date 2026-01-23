@@ -101,9 +101,9 @@ const ChatInterface: React.FC = () => {
   
   
   // Local environment
-  const baseUrl = 'http://localhost:3001';
+  // const baseUrl = 'http://localhost:3001';
   // Test Environment
-  // const baseUrl = 'https://dev.agenta.zeroproofai.com';
+  const baseUrl = 'https://dev.agenta.zeroproofai.com';
  
   const wsUrl = baseUrl.replace('https://', 'wss://').replace('http://', 'ws://');
   const proofsApiUrl = `${baseUrl}/proofs`;
