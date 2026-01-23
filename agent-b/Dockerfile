@@ -19,6 +19,7 @@ COPY agent-b/pricing-core/ ./pricing-core/
 COPY agent-b/mcp-server/ ./mcp-server/
 COPY agent-b/program/ ./program/
 COPY agent-b/server/ ./server/
+COPY agent-b/shared/ ./shared/
 
 # Build the MCP server in release mode
 RUN cargo build --release -p agent-b-mcp-server
