@@ -240,6 +240,8 @@ async fn zk_input_handler(
 async fn main() {
     let attester_url = std::env::var("ATTESTER_URL")
         .unwrap_or_else(|_| "http://localhost:8000".to_string());
+    
+    println!("[INIT] Attestation Service URL: {}", attester_url);
 
     // Read the proper ELF binary (not .a archive)
     let elf_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))

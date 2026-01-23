@@ -101,7 +101,8 @@ pub async fn handle_async(req: Request, zkfetch_url: String, session_id: &str) -
         default_zk_options: None,
         debug: true,
         attestation_config: Some(proxy_fetch::AttestationConfig {
-            service_url: "https://dev.attester.zeroproofai.com".to_string(),
+            service_url: std::env::var("ATTESTER_URL")
+                .unwrap_or_else(|_| "https://dev.attester.zeroproofai.com".to_string()),
             enabled: true,  // Enable attestation for airline confirmation proofs
             workflow_stage: Some("airline_confirmation".to_string()),
             session_id: Some(session_id.to_string()),

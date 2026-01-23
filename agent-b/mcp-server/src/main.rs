@@ -330,15 +330,25 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(&addr)
         .await?;
 
+    let attester_url = std::env::var("ATTESTER_URL")
+        .unwrap_or_else(|_| "http://localhost:8000".to_string());
+
+    // Print zkfetch endpoint configuration
+    let zkfetch_url = std::env::var("ZKFETCH_WRAPPER_URL")
+        .unwrap_or_else(|_| "http://localhost:8003".to_string());
+    
+    println!("[INIT] Server configuration:");
+    println!("🔐 zkfetch Endpoint: {}/zkfetch", zkfetch_url);
+    println!("📍 Attestation Service: {}\n", attester_url);
+    
     println!("✓ Agent B MCP Server running on http://0.0.0.0:{}", port);
     println!("  GET  /tools                     — List all tools");
     println!("  POST /tools/get-ticket-price    — Get flight pricing");
     println!("  POST /tools/book-flight         — Book a flight\n");
 
-    // Print zkfetch endpoint configuration
-    let zkfetch_url = std::env::var("ZKFETCH_WRAPPER_URL")
-        .unwrap_or_else(|_| "http://localhost:8003".to_string());
-    println!("🔐 zkfetch Endpoint: {}/zkfetch\n", zkfetch_url);
+    
+    
+    
 
     axum::serve(listener, app).await?;
 

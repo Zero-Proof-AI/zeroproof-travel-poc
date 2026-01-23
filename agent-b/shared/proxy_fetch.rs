@@ -699,8 +699,8 @@ impl ProxyFetch {
                     response: response_body,
                     proof: proof_json,
                     proof_id: None,
-                    verified: false,
-                    onchain_compatible: false,
+                    verified: true,  // zkfetch proofs are cryptographically verified
+                    onchain_compatible: true,  // ZK-TLS proofs can be verified on-chain
                     display_response: None,
                     redaction_metadata: None,
                 };

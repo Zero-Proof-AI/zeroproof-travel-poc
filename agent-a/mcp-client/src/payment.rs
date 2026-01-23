@@ -101,8 +101,10 @@ pub async fn enroll_card_if_needed(
         // This prevents Agent-A from dictating which proof to verify.
 
         // Create attestation config with the correct session_id
+        let attestation_url = std::env::var("ATTESTER_URL")
+            .unwrap_or_else(|_| "https://dev.attester.zeroproofai.com".to_string());
         let attestation_config = Some(AttestationConfig {
-            service_url: "https://dev.attester.zeroproofai.com".to_string(),
+            service_url: attestation_url,
             enabled: true,
             workflow_stage: Some("payment_enrollment".to_string()),
             session_id: Some(session_id.to_string()),

@@ -136,7 +136,7 @@ async fn health() -> Json<HealthResponse> {
 /// Helper to get attestation service URL from environment or default
 fn get_attestation_service_url() -> String {
     std::env::var("ATTESTER_URL")
-        .unwrap_or_else(|_| "http://localhost:8000".to_string())
+        .unwrap_or_else(|_| "https://dev.attester.zeroproofai.com".to_string())
 }
 
 /// Helper to get attestation service URL and HTTP client together
@@ -328,7 +328,7 @@ async fn handle_websocket(socket: WebSocket, sessions: SessionManager) {
                             established_session.clone()
                         } else {
                             // First message - server generates new session ID (ignore client-provided)
-                            let server_generated_session_id = format!("ws_sess_{}", uuid::Uuid::new_v4());
+                            let server_generated_session_id = format!("agent-a-{}", uuid::Uuid::new_v4());
                             session_id = Some(server_generated_session_id.clone());
                             println!("[WEBSOCKET] Server generated new session: {}", server_generated_session_id);
                             server_generated_session_id
@@ -428,59 +428,6 @@ async fn handle_websocket(socket: WebSocket, sessions: SessionManager) {
     }
 
     println!("[WEBSOCKET] Connection ended");
-}
-
-/// Submit a cryptographic proof - proxy to zk-attestation-service
-async fn submit_proof(
-    Json(payload): Json<ProofSubmissionRequest>,
-) -> impl IntoResponse {
-    println!("[AGENT-A PROOF SUBMIT] 📤 Received proof submission");
-    println!("  tool_name: {}", payload.tool_name);
-    println!("  session_id: {}", payload.session_id);
-    println!("  verified: {}", payload.verified);
-    println!("  onchain_compatible: {}", payload.onchain_compatible);
-    println!("  workflow_stage: {:?}", payload.workflow_stage);
-    
-    let (attestation_url, client) = get_attestation_client();
-    
-    println!("[AGENT-A PROOF SUBMIT] Calling attestation service at: {}/proofs/submit", attestation_url);
-    
-    let submit_url = format!("{}/proofs/submit", attestation_url);
-    
-    match client.post(&submit_url).json(&payload).send().await {
-        Ok(response) => {
-            println!("[AGENT-A PROOF SUBMIT] ✓ Got response from attestation service (status: {})", response.status());
-            
-            match response.json::<ProofSubmissionResponse>().await {
-                Ok(result) => {
-                    println!("[AGENT-A PROOF SUBMIT] ✅ Proof submitted successfully: proof_id={:?}", result.proof_id);
-                    (StatusCode::OK, Json(result))
-                }
-                Err(e) => {
-                    println!("[AGENT-A PROOF SUBMIT] ❌ Failed to parse attestation response: {}", e);
-                    (
-                        StatusCode::BAD_GATEWAY,
-                        Json(ProofSubmissionResponse {
-                            success: false,
-                            proof_id: String::new(),
-                            error: Some(format!("Failed to parse response: {}", e)),
-                        }),
-                    )
-                }
-            }
-        }
-        Err(e) => {
-            println!("[AGENT-A PROOF SUBMIT] ❌ Failed to call attestation service at {}: {}", submit_url, e);
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(ProofSubmissionResponse {
-                    success: false,
-                    proof_id: String::new(),
-                    error: Some(format!("Attestation service error: {}", e)),
-                }),
-            )
-        }
-    }
 }
 
 /// Retrieve proofs for a session - proxy to zk-attestation-service
@@ -685,7 +632,6 @@ async fn main() {
         .route("/health", get(health))
         .route("/chat", post(chat))
         .route("/ws/chat", get(websocket_chat))
-        .route("/proofs", post(submit_proof))
         .route("/proofs/verify/:proof_id", get(get_proof_by_id))  // Most specific first
         .route("/proofs/:session_id/count", get(get_proof_count)) // Second most specific
         .route("/proofs/:session_id", get(get_proofs))             // Least specific (catch-all)
