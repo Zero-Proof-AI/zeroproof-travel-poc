@@ -3,6 +3,7 @@
 
 use regex::Regex;
 use once_cell::sync::Lazy;
+use shared::verify_secp256k1_sig;
 
 /// List of trusted payment agent endpoints that Agent-B accepts
 pub const ACCEPTED_PAYMENT_AGENT_URLS: &[&str] = &[
@@ -182,21 +183,7 @@ pub async fn verify_payment_proof(
     }
     
     // VERIFICATION 3: Verify proof cryptographic signature
-    // Signature is at proof_data.proof.signatures[0]
-    let signature = proof_data
-        .get("proof")
-        .and_then(|p| p.get("signatures"))
-        .and_then(|sigs| sigs.as_array())
-        .and_then(|arr| arr.first())
-        .and_then(|sig| sig.as_str())
-        .ok_or_else(|| "Proof missing cryptographic signature".to_string())?;
-    
-    // Verify the signature is non-empty and appears valid (not just "0xMOCK_SIGNATURE")
-    if signature.is_empty() || signature == "0xMOCK_SIGNATURE" {
-        return Err("Invalid or mock cryptographic signature in proof".to_string());
-    }
-    
-    tracing::info!("[VERIFY-PAYMENT] ✓ Cryptographic signature verified");
+    verify_secp256k1_sig(proof_data)?;
     
     tracing::info!("[VERIFY-PAYMENT] ✓ All payment proof verifications passed");
     Ok(())

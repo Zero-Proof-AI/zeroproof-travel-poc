@@ -28,6 +28,11 @@ base64 = "0.22"
 # Async runtime
 tokio = { version = "1", features = ["sync"] }
 
+# Cryptography
+secp256k1 = { version = "0.27", features = ["recovery"] }
+sha3 = "0.10"
+hex = "0.4"
+
 # Time utilities
 chrono = "0.4"
 
