@@ -167,7 +167,7 @@ const ProofModal: React.FC<ProofModalProps> = React.memo(({ open, selectedProof,
               <strong>Click to expand proof data</strong> (for on-chain verification)
             </summary>
             <pre style={{ background: '#f7fafc', padding: '0.75rem', borderRadius: '0.25rem', fontSize: '0.75rem', overflow: 'auto', maxHeight: '300px', marginTop: '0.5rem' }}>
-              {JSON.stringify(selectedProof.proof, null, 2)}
+              {JSON.stringify(selectedProof.proof?.onchainProof || selectedProof.proof, null, 2)}
             </pre>
           </details>
         </div>
