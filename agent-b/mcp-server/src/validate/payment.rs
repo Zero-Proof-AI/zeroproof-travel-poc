@@ -212,7 +212,7 @@ pub async fn verify_payment_proof(
     tracing::info!("[VERIFY-PAYMENT] Using {} for on-chain verification", proof_type);
     
     // Use on-chain verification (true parameter)
-    verify_secp256k1_sig(proof_to_verify, true).await?;
+    verify_secp256k1_sig(proof_to_verify, true, false).await?;
     
     tracing::info!("[VERIFY-PAYMENT] ✓ All payment proof verifications passed");
     Ok(())

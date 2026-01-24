@@ -653,7 +653,7 @@ impl ProxyFetch {
     ) {
         let tool_name_str = tool_name.unwrap_or_else(|| "direct-fetch".to_string());
         
-        println!("[PROXY_FETCH] zkfetch_response for {}: {}", tool_name_str, serde_json::to_string_pretty(&zkfetch_response).unwrap_or_default());
+        // println!("[PROXY_FETCH] zkfetch_response for {}: {}", tool_name_str, serde_json::to_string_pretty(&zkfetch_response).unwrap_or_default());
         
         // Extract proof from zkfetch response
         // The proof is directly at response.proof, not response.proof.proof

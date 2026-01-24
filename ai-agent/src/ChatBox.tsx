@@ -62,7 +62,7 @@ const ChatBox: React.FC<ChatBoxProps> = ({ messages, loading, messagesEndRef }) 
 
       {loading && (
         <div style={{ padding: '1rem', textAlign: 'center', color: '#718096' }}>
-          Agent is thinking...
+          Please wait, agent is working...
         </div>
       )}
       <div ref={messagesEndRef} style={{ minHeight: '1px' }} />

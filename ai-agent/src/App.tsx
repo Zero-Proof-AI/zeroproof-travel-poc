@@ -403,8 +403,47 @@ const ChatInterface: React.FC = () => {
         </header>
 
         <main style={{ flex: 1, overflow: 'hidden', padding: '1rem', background: '#f7fafc', display: 'flex', gap: '1rem' }}>
-          <div style={{ flex: showProofs ? 2 : 1, minWidth: 0, overflowY: 'auto' }}>
-            <ChatBox messages={messages} loading={loading} messagesEndRef={messagesEndRef} />
+          <div style={{ flex: showProofs ? 2 : 1, minWidth: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+            <div style={{ flex: 1, overflowY: 'auto', marginBottom: '1rem' }}>
+              <ChatBox messages={messages} loading={loading} messagesEndRef={messagesEndRef} />
+            </div>
+            
+            <footer style={{ padding: '0.5rem', background: '#2d3748', borderTop: '1px solid #e2e8f0', borderRadius: '0.25rem', flexShrink: 0 }}>
+              <div style={{ display: 'flex', gap: '0.5rem' }}>
+                <input
+                  ref={inputRef}
+                  type="text"
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
+                  placeholder="Type your message..."
+                  disabled={loading}
+                  style={{
+                    flex: 1,
+                    padding: '0.5rem',
+                    borderRadius: '0.25rem',
+                    border: '1px solid #cbd5e0',
+                    fontSize: '1rem',
+                  }}
+                />
+                <button
+                  onClick={handleSendMessage}
+                  disabled={loading || !input.trim()}
+                  style={{
+                    padding: '0.5rem 1rem',
+                    background: '#4299e1',
+                    color: '#fff',
+                    border: 'none',
+                    borderRadius: '0.25rem',
+                    cursor: loading ? 'not-allowed' : 'pointer',
+                    opacity: loading ? 0.6 : 1,
+                    fontSize: '1rem',
+                  }}
+                >
+                  Send
+                </button>
+              </div>
+            </footer>
           </div>
 
           <div style={{ flex: showProofs ? 1 : 0.8, minWidth: 0, maxWidth: '300px', display: 'flex', flexDirection: 'column' }}>
@@ -413,43 +452,6 @@ const ChatInterface: React.FC = () => {
 
           {showProofs && <ProofsPanel />}
         </main>
-
-        <footer style={{ padding: '1rem', background: '#2d3748', borderTop: '1px solid #e2e8f0' }}>
-          <div style={{ maxWidth: showProofs ? '1200px' : '900px', margin: '0 auto', display: 'flex', gap: '0.5rem' }}>
-            <input
-              ref={inputRef}
-              type="text"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
-              placeholder="Type your message..."
-              disabled={loading}
-              style={{
-                flex: 1,
-                padding: '0.75rem',
-                borderRadius: '0.25rem',
-                border: '1px solid #cbd5e0',
-                fontSize: '1rem',
-              }}
-            />
-            <button
-              onClick={handleSendMessage}
-              disabled={loading || !input.trim()}
-              style={{
-                padding: '0.75rem 1.5rem',
-                background: '#4299e1',
-                color: '#fff',
-                border: 'none',
-                borderRadius: '0.25rem',
-                cursor: loading ? 'not-allowed' : 'pointer',
-                opacity: loading ? 0.6 : 1,
-                fontSize: '1rem',
-              }}
-            >
-              Send
-            </button>
-          </div>
-        </footer>
       </div>
     </ProofsProvider>
   );

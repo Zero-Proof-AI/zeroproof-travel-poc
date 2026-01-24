@@ -57,6 +57,7 @@ dependencies = [
  "axum",
  "chrono",
  "dotenv",
+ "ethers",
  "hex",
  "once_cell",
  "pricing-core",
