@@ -36,6 +36,9 @@ hex = "0.4"
 # Time utilities
 chrono = "0.4"
 
+# Ethereum interaction
+ethers = { version = "2.0", features = ["abigen"] }
+
 [lib]
 name = "shared"
 path = "mod.rs"

@@ -183,7 +183,8 @@ pub async fn verify_payment_proof(
     }
     
     // VERIFICATION 3: Verify proof cryptographic signature
-    verify_secp256k1_sig(proof_data)?;
+    // Use local verification by default, can be changed to on-chain via config
+    verify_secp256k1_sig(proof_data, false).await?;
     
     tracing::info!("[VERIFY-PAYMENT] ✓ All payment proof verifications passed");
     Ok(())
