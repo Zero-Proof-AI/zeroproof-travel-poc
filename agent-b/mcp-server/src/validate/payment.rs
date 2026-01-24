@@ -83,7 +83,7 @@ pub async fn verify_payment_proof(
         .ok_or_else(|| "No retrieve-payment-credentials proof found for this session".to_string())?;
     
     // Debug: Print the entire proof structure
-    tracing::info!("[VERIFY-PAYMENT] Full proof response:\n{}", serde_json::to_string_pretty(&proof).unwrap_or_else(|_| "Failed to serialize".to_string()));
+    // tracing::info!("[VERIFY-PAYMENT] Full proof response:\n{}", serde_json::to_string_pretty(&proof).unwrap_or_else(|_| "Failed to serialize".to_string()));
     
     // Extract the proof data from the proof object
     // The proof structure has: { proof: { onchainProof: {...}, proof: {...} }, ... }
@@ -95,6 +95,23 @@ pub async fn verify_payment_proof(
                 .unwrap_or_default();
             format!("Proof missing 'proof' field. Available keys: {:?}", available_keys)
         })?;
+    
+    // Debug: Log the proof_data structure to understand what we're receiving
+    tracing::info!("[VERIFY-PAYMENT] Proof structure from attestation:");
+    if let Some(obj) = proof_data.as_object() {
+        let keys: Vec<_> = obj.keys().collect();
+        tracing::info!("[VERIFY-PAYMENT]   Keys: {:?}", keys);
+        if obj.contains_key("onchainProof") {
+            tracing::info!("[VERIFY-PAYMENT]   ✓ Contains onchainProof");
+        } else {
+            tracing::warn!("[VERIFY-PAYMENT]   ✗ Missing onchainProof");
+        }
+        if obj.contains_key("proof") {
+            tracing::info!("[VERIFY-PAYMENT]   ✓ Contains proof");
+        } else {
+            tracing::warn!("[VERIFY-PAYMENT]   ✗ Missing proof");
+        }
+    }
     
     // VERIFICATION 1: Check that the URL is in the accepted whitelist
     // Structure: proof_data contains { onchainProof: {...}, proof: {...} }
@@ -183,8 +200,19 @@ pub async fn verify_payment_proof(
     }
     
     // VERIFICATION 3: Verify proof cryptographic signature
-    // Use local verification by default, can be changed to on-chain via config
-    verify_secp256k1_sig(proof_data, false).await?;
+    // Extract the appropriate proof for on-chain verification
+    // Both raw proof and onchainProof have the same structure and identifier
+    // Use onchainProof if available (preferred for on-chain use), otherwise fall back to raw proof
+    let proof_to_verify = proof_data
+        .get("onchainProof")
+        .or_else(|| proof_data.get("proof"))
+        .ok_or_else(|| "Proof missing both 'onchainProof' and 'proof' fields".to_string())?;
+    
+    let proof_type = if proof_data.get("onchainProof").is_some() { "onchainProof" } else { "raw proof" };
+    tracing::info!("[VERIFY-PAYMENT] Using {} for on-chain verification", proof_type);
+    
+    // Use on-chain verification (true parameter)
+    verify_secp256k1_sig(proof_to_verify, true).await?;
     
     tracing::info!("[VERIFY-PAYMENT] ✓ All payment proof verifications passed");
     Ok(())

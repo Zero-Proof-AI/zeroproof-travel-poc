@@ -499,7 +499,7 @@ pub async fn process_user_query(
                             let passenger_email = state.passenger_email.clone().unwrap_or_default();
                             let enrollment_token_id = state.enrollment_token_id.clone().unwrap_or_default();
 
-                            send_progress(&progress_tx, &format!("💳 Initiating payment for ${:.2}...(Please wait, it takes time to generate ZKP)", price)).await;
+                            send_progress(&progress_tx, &format!("💳 Initiating payment for ${:.2}...", price)).await;
                             
                             let payment_agent_url = config.payment_agent_url.as_deref()
                                 .expect("Payment agent URL required for payment initiation");

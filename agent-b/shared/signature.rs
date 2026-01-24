@@ -189,9 +189,9 @@ async fn verify_sdk_sig(
 /// The contract performs cryptographic verification and transaction status indicates result.
 /// 
 /// This requires:
-/// - RECLAIM_RPC_URL: RPC endpoint (default: https://sepolia.optimism.io)
-/// - RECLAIM_CONTRACT_ADDRESS: Contract address (default: 0xAe94FB09711e1c6B057853a515483792d8e474d0)
-/// - RECLAIM_PRIVATE_KEY: Private key for transaction signer (required for on-chain verification)
+/// - SEPOLIA_RPC_URL: RPC endpoint (default: https://sepolia.optimism.io)
+/// - RECLAIM_ADDRESS: Contract address (default: 0xAe94FB09711e1c6B057853a515483792d8e474d0)
+/// - PRIVATE_KEY: Private key for transaction signer (required for on-chain verification)
 async fn verify_onchain_sig(
     proof_data: &serde_json::Value,
 ) -> Result<(), String> {
@@ -199,36 +199,22 @@ async fn verify_onchain_sig(
     use ethers::abi::Token;
     use ethers::middleware::SignerMiddleware;
     use ethers::types::transaction::eip2718::TypedTransaction;
+    use hex;
     
     // Get configuration from environment
-    let rpc_url = std::env::var("RECLAIM_RPC_URL")
-        .unwrap_or_else(|_| "https://sepolia.optimism.io".to_string());
-    let contract_address_str = std::env::var("RECLAIM_CONTRACT_ADDRESS")
+    let rpc_url = std::env::var("SEPOLIA_RPC_URL")
+        .unwrap_or_else(|_| "https://sepolia.sepolia.io".to_string());
+    
+    let contract_address_str = std::env::var("RECLAIM_ADDRESS")
         .unwrap_or_else(|_| "0xAe94FB09711e1c6B057853a515483792d8e474d0".to_string());
     
     // Private key is required for on-chain verification to send transaction
-    let private_key_str = std::env::var("RECLAIM_PRIVATE_KEY")
-        .map_err(|_| "RECLAIM_PRIVATE_KEY environment variable required for on-chain verification".to_string())?;
+    let private_key_str = std::env::var("PRIVATE_KEY")
+        .map_err(|_| "PRIVATE_KEY environment variable required for on-chain verification".to_string())?;
     
     tracing::info!("[VERIFY-SIG] Verifying proof on-chain via contract: {}", contract_address_str);
-    tracing::debug!("[VERIFY-SIG] RPC URL: {}", rpc_url);
     
-    // Extract onchainProof from proof_data for smart contract verification
-    let onchain_proof = proof_data
-        .get("onchainProof")
-        .ok_or_else(|| "Proof missing onchainProof for on-chain verification".to_string())?;
-    
-    // Verify the proof has required fields for on-chain verification
-    // Required: claimInfo (ClaimInfo struct) and signedClaim (SignedClaim struct)
-    onchain_proof
-        .get("claimInfo")
-        .ok_or_else(|| "Proof missing claimInfo for on-chain verification".to_string())?;
-    
-    onchain_proof
-        .get("signedClaim")
-        .ok_or_else(|| "Proof missing signedClaim for on-chain verification".to_string())?;
-    
-    tracing::debug!("[VERIFY-SIG] On-chain proof structure validated");
+    tracing::debug!("[VERIFY-SIG] On-chain proof structure ready for contract call");
     
     // Step 1: Connect to RPC provider
     tracing::debug!("[VERIFY-SIG] Connecting to RPC provider: {}", rpc_url);
@@ -277,57 +263,134 @@ async fn verify_onchain_sig(
     // Create signer client early so we can use it for gas estimation and transaction sending
     let client = SignerMiddleware::new(provider, signer);
     
-    // Step 7: Extract and validate proof structure for contract call
-    // The contract expects a structured Proof with claimInfo and signedClaim
-    // Extract onchainProof which should have the correct structure:
-    // {
-    //   claimInfo: { provider, parameters, context },
-    //   signedClaim: {
-    //     claim: { identifier (bytes32), owner (address), timestampS (uint32), epoch (uint32) },
-    //     signatures: bytes[]
-    //   }
-    // }
-    let claim_info = onchain_proof
-        .get("claimInfo")
-        .ok_or_else(|| "Missing claimInfo in proof".to_string())?;
+    // Step 7: Extract onchainProof - it might be at the top level or nested
+    // Structure could be:
+    // 1. { onchainProof: {...}, proof: {...} }  - from agent-a via attestation
+    // 2. { claimInfo: {...}, signedClaim: {...} } - direct onchain proof
+    let onchain_proof_value = if let Some(op) = proof_data.get("onchainProof") {
+        tracing::debug!("[VERIFY-SIG] Found onchainProof at top level");
+        op.clone()
+    } else if proof_data.get("claimInfo").is_some() {
+        // Proof is already in onchain format
+        tracing::debug!("[VERIFY-SIG] Proof is already in onchain format (has claimInfo)");
+        proof_data.clone()
+    } else {
+        return Err("Missing onchainProof or claimInfo in proof_data".to_string());
+    };
     
-    let signed_claim = onchain_proof
-        .get("signedClaim")
-        .ok_or_else(|| "Missing signedClaim in proof".to_string())?;
+    // DEBUG: Log the structure of onchain_proof_value
+    tracing::debug!("[VERIFY-SIG] onchain_proof_value keys: {:?}", onchain_proof_value.as_object().map(|o| o.keys().collect::<Vec<_>>()));
+    if let Some(signed_claim) = onchain_proof_value.get("signedClaim") {
+        tracing::debug!("[VERIFY-SIG] signedClaim keys: {:?}", signed_claim.as_object().map(|o| o.keys().collect::<Vec<_>>()));
+    }
     
-    // Validate claimInfo structure
-    let provider = claim_info
-        .get("provider")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "Missing or invalid provider in claimInfo".to_string())?;
+    // Extract ClaimInfo fields
+    let claim_info = onchain_proof_value.get("claimInfo").ok_or("Missing claimInfo")?;
+    let provider = claim_info.get("provider").and_then(|v| v.as_str()).ok_or("Missing provider")?;
+    let parameters = claim_info.get("parameters").and_then(|v| v.as_str()).ok_or("Missing parameters")?;
+    let context = claim_info.get("context").and_then(|v| v.as_str()).ok_or("Missing context")?;
     
-    // Validate signedClaim.claim structure
-    let claim = signed_claim
-        .get("claim")
-        .ok_or_else(|| "Missing claim in signedClaim".to_string())?;
+    tracing::debug!("[VERIFY-SIG] ClaimInfo fields:");
+    tracing::debug!("[VERIFY-SIG]   provider: {:?}", provider);
+    tracing::debug!("[VERIFY-SIG]   parameters: {:?}", parameters);
+    tracing::debug!("[VERIFY-SIG]   context: {:?}", context);
     
-    tracing::debug!("[VERIFY-SIG] Proof structure validated: provider={}, claim has identifier/owner/timestamp/epoch, signatures count=", 
-        provider);
+    // NOTE: According to Reclaim Protocol docs, we should NOT verify that
+    // identifier == keccak256(abi.encodePacked(provider + parameters + context))
+    // The identifier is generated by Reclaim attestors server-side and cannot be locally computed.
+    // The contract verifies witness signatures and accepts the identifier as-is.
     
-    // Encode the proof structure for contract call
-    // The proof_json will be serialized and encoded as function parameters
-    let proof_json = serde_json::to_string(onchain_proof)
-        .map_err(|e| format!("Failed to serialize proof: {}", e))?;
+    // Extract SignedClaim data
+    let signed_claim = onchain_proof_value.get("signedClaim").ok_or("Missing signedClaim")?;
     
-    // Encode function selector (verifyProof) + parameters
-    let tokens = vec![Token::String(proof_json)];
-    let encoded_params = ethers::abi::encode(&tokens);
+    // Extract CompleteClaimData fields from SignedClaim.claim (not claimData)
+    let claim_data = signed_claim.get("claim").ok_or("Missing claim in signedClaim")?;
+    let identifier_str = claim_data.get("identifier").and_then(|v| v.as_str()).ok_or("Missing identifier")?;
+    let owner_str = claim_data.get("owner").and_then(|v| v.as_str()).ok_or("Missing owner")?;
+    let claim = claim_data.clone();
     
-    // Function selector for verifyProof(Proof) - compute keccak256 hash of function signature
+    tracing::info!("[VERIFY-SIG] Identifier from proof: {}", identifier_str);
+    
+    // Parse identifier from hex to H256
+    let identifier_h256: H256 = identifier_str.parse()
+        .map_err(|e| format!("Invalid identifier hex: {}", e))?;
+    
+    // Build ClaimInfo tuple token: (string, string, string)
+    let claim_info_token = Token::Tuple(vec![
+        Token::String(provider.to_string()),
+        Token::String(parameters.to_string()),
+        Token::String(context.to_string()),
+    ]);
+    let owner_addr: Address = owner_str.parse()
+        .map_err(|e| format!("Invalid owner address: {}", e))?;
+    
+    let timestamp = claim.get("timestampS").and_then(|v| v.as_u64()).ok_or("Missing timestampS")? as u32;
+    let epoch = claim.get("epoch").and_then(|v| v.as_u64()).ok_or("Missing epoch")? as u32;
+    
+    // Build CompleteClaimData tuple token: (bytes32, address, uint32, uint32)
+    let complete_claim_token = Token::Tuple(vec![
+        Token::FixedBytes(identifier_h256.as_bytes().to_vec()),
+        Token::Address(owner_addr),
+        Token::Uint(U256::from(timestamp)),
+        Token::Uint(U256::from(epoch)),
+    ]);
+    
+    // Extract signatures array: bytes[]
+    let signatures = signed_claim.get("signatures").and_then(|v| v.as_array()).ok_or("Missing signatures")?;
+    let sig_tokens: Result<Vec<Token>, String> = signatures
+        .iter()
+        .map(|sig| {
+            let sig_str = sig.as_str().ok_or_else(|| "Signature is not a string".to_string())?;
+            let sig_bytes = hex::decode(sig_str.trim_start_matches("0x"))
+                .map_err(|e| format!("Failed to decode signature: {}", e))?;
+            Ok(Token::Bytes(sig_bytes))
+        })
+        .collect();
+    
+    // Build SignedClaim tuple token: (CompleteClaimData, bytes[])
+    let signed_claim_token = Token::Tuple(vec![
+        complete_claim_token,
+        Token::Array(sig_tokens?),
+    ]);
+    
+    // Build full Proof tuple: (ClaimInfo, SignedClaim)
+    let proof_token = Token::Tuple(vec![
+        claim_info_token,
+        signed_claim_token,
+    ]);
+    
+    // Encode the proof as ABI-compliant tuple
+    let encoded_params = ethers::abi::encode(&vec![proof_token]);
+    
+    tracing::debug!("[VERIFY-SIG] Proof encoded as ABI-compliant tuple structure");
+    tracing::debug!("[VERIFY-SIG] Encoded params hex: 0x{}", hex::encode(&encoded_params));
+    
+    // Compute function selector using the full canonical signature
+    // ethers.js computes this from the complete nested struct type definition
+    // NOTE: The entire Proof struct is ONE parameter (a single tuple), so wrap in outer parentheses
+    let full_signature = "verifyProof(((string,string,string),((bytes32,address,uint32,uint32),bytes[])))";
     let mut selector_hasher = Keccak256::new();
-    selector_hasher.update(b"verifyProof(Proof)");
+    selector_hasher.update(full_signature.as_bytes());
     let selector_hash = selector_hasher.finalize();
     let function_selector = &selector_hash[0..4]; // First 4 bytes
+    
+    tracing::info!("[VERIFY-SIG] Function signature: {}", full_signature);
+    tracing::info!("[VERIFY-SIG] Function selector: 0x{}", hex::encode(function_selector));
     
     let mut call_data = function_selector.to_vec();
     call_data.extend_from_slice(&encoded_params);
     
-    tracing::debug!("[VERIFY-SIG] Function call encoded, call_data length: {} bytes", call_data.len());
+    tracing::info!("[VERIFY-SIG] Full call_data hex: 0x{}", hex::encode(&call_data));
+    tracing::info!("[VERIFY-SIG] Call_data length: {} bytes", call_data.len());
+    
+    // DEBUG: Log key fields being sent
+    tracing::info!("[VERIFY-SIG] Proof data summary:");
+    tracing::info!("[VERIFY-SIG]   Provider: {}", provider);
+    tracing::info!("[VERIFY-SIG]   Owner: {}", owner_str);
+    tracing::info!("[VERIFY-SIG]   Timestamp: {}", timestamp);
+    tracing::info!("[VERIFY-SIG]   Epoch: {}", epoch);
+    tracing::info!("[VERIFY-SIG]   Identifier: {}", identifier_str);
+    tracing::info!("[VERIFY-SIG]   Signatures count: {}", signatures.len());
     
     // Step 8: Build transaction request
     let tx_request = TransactionRequest::new()
@@ -379,3 +442,40 @@ async fn verify_onchain_sig(
         Err("On-chain verification FAILED - Transaction reverted or failed".to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_identifier_hash_computation() {
+        // These are the EXACT string values from the working proof
+        // They must match byte-for-byte with what the attestation service provides
+        let provider = "http";
+        let parameters = r#"{"body":"","headers":{"User-Agent":"reclaim/0.0.1","accept":"application/json"},"method":"GET","responseMatches":[{"type":"regex","value":"\"origin\":\\s*\"(?<origin>[^\"]+)\""}],"responseRedactions":[],"url":"https://httpbin.org/get"}"#;
+        let context = r#"{"extractedParameters":{"origin":"3.110.82.84"},"providerHash":"0x245a11f715ca085fabe2986526a51e43f286650f992dde2d036daf2f16fc1370"}"#;
+        
+        // Compute identifier hash the way Solidity does
+        let mut hasher = Keccak256::new();
+        hasher.update(provider.as_bytes());
+        hasher.update(parameters.as_bytes());
+        hasher.update(context.as_bytes());
+        let computed = hasher.finalize();
+        
+        let computed_hex = format!("0x{}", hex::encode(&computed[..]));
+        let expected_hex = "0x2bd1cc71a31100fe3e6137cd6d19cde93d371047827bb0f13f66572e191cd82e";
+        
+        eprintln!("Computed: {}", computed_hex);
+        eprintln!("Expected: {}", expected_hex);
+        eprintln!("Parameters length: {}", parameters.len());
+        eprintln!("Parameters: {}", parameters);
+        
+        // Note: If this fails, it means the JSON in proof-structure.json wasn't the true source
+        assert_eq!(
+            computed_hex.to_lowercase(),
+            expected_hex.to_lowercase(),
+            "Identifier hash mismatch! Check that the parameter strings match exactly (no escaping differences)."
+        );
+    }
+}
+

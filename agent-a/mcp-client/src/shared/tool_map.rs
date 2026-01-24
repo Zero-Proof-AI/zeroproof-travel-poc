@@ -99,6 +99,8 @@ pub fn build_tool_options_map() -> ToolOptionsMap {
     // retrieve-payment-credentials: Payment credential retrieval - redact sensitive identifiers
     // Reveals ONLY: status, instructionId, authorization (proof of successful payment)
     // Hides: tokenId, signedPayload, and other sensitive identifiers from proof
+    // NOTE: The on-chain proof will have placeholder values for hidden parameters,
+    // and the contract should verify the identifier against keccak256(claimInfo with placeholders)
     let mut credentials_paths = HashMap::new();
     credentials_paths.insert("status".to_string(), "$.data.status".to_string());
     credentials_paths.insert("instructionId".to_string(), "$.data.instructionId".to_string());
