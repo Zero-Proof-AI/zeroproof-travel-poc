@@ -153,123 +153,43 @@ IMPORTANT:
     }
 }
 
-/// Call server tool via HTTP (routes to appropriate server: Agent A, Agent B, or Payment Agent)
+/// Call server tool via HTTP at a specific server URL
 pub async fn call_server_tool(
     client: &reqwest::Client,
-    agent_a_url: &str,
-    agent_b_url: &str,
-    payment_agent_url: Option<&str>,
+    server_url: &str,
     tool_name: &str,
     arguments: Value,
 ) -> Result<String> {
-    let agent_b_tools = [
-        "get-ticket-price",
-        "book-flight",
-    ];
-    
-    let payment_tools = [
-        "enroll-card",
-        "initiate-purchase-instruction",
-        "retrieve-payment-credentials",
-    ];
-    
-    if agent_b_tools.contains(&tool_name) {
-        // Agent B tools use direct HTTP calls
-        let url = format!("{}/tools/{}", agent_b_url, tool_name);
+    let url = format!("{}/tools/{}", server_url, tool_name);
 
-        let response = client
-            .post(&url)
-            .json(&arguments)
-            .send()
-            .await?;
+    let response = client
+        .post(&url)
+        .json(&arguments)
+        .send()
+        .await?;
 
-        if !response.status().is_success() {
-            let error_text = response.text().await?;
-            return Err(anyhow!("Server error: {}", error_text));
-        }
+    if !response.status().is_success() {
+        let error_text = response.text().await?;
+        return Err(anyhow!("Server error: {}", error_text));
+    }
 
-        let result: Value = response.json().await?;
+    let result: Value = response.json().await?;
 
-        if let Some(error) = result.get("error") {
-            if error.is_null() {
-                if let Some(data) = result.get("data") {
-                    Ok(data.to_string())
-                } else {
-                    Err(anyhow!("Invalid server response"))
-                }
+    // Extract data from response
+    if let Some(error) = result.get("error") {
+        if error.is_null() {
+            if let Some(data) = result.get("data") {
+                Ok(data.to_string())
             } else {
-                Err(anyhow!("Tool error: {}", error))
+                Err(anyhow!("Invalid server response"))
             }
-        } else if let Some(data) = result.get("data") {
-            Ok(data.to_string())
         } else {
-            Err(anyhow!("Invalid server response"))
+            Err(anyhow!("Tool error: {}", error))
         }
-    } else if payment_tools.contains(&tool_name) && payment_agent_url.is_some() {
-        // Payment Agent tools
-        let payment_url = payment_agent_url.unwrap();
-        let url = format!("{}/tools/{}", payment_url, tool_name);
-
-        let response = client
-            .post(&url)
-            .json(&arguments)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            let error_text = response.text().await?;
-            return Err(anyhow!("Payment agent error: {}", error_text));
-        }
-
-        let result: Value = response.json().await?;
-
-        if let Some(error) = result.get("error") {
-            if error.is_null() {
-                if let Some(data) = result.get("data") {
-                    Ok(data.to_string())
-                } else {
-                    Err(anyhow!("Invalid server response"))
-                }
-            } else {
-                Err(anyhow!("Tool error: {}", error))
-            }
-        } else if let Some(data) = result.get("data") {
-            Ok(data.to_string())
-        } else {
-            Err(anyhow!("Invalid server response"))
-        }
+    } else if let Some(data) = result.get("data") {
+        Ok(data.to_string())
     } else {
-        // Agent A tools or other tools
-        let url = format!("{}/tools/{}", agent_a_url, tool_name);
-
-        let response = client
-            .post(&url)
-            .json(&arguments)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            let error_text = response.text().await?;
-            return Err(anyhow!("Server error: {}", error_text));
-        }
-
-        let result: Value = response.json().await?;
-
-        if let Some(error) = result.get("error") {
-            if error.is_null() {
-                if let Some(data) = result.get("data") {
-                    Ok(data.to_string())
-                } else {
-                    Err(anyhow!("Invalid server response"))
-                }
-            } else {
-                Err(anyhow!("Tool error: {}", error))
-            }
-        } else if let Some(data) = result.get("data") {
-            Ok(data.to_string())
-        } else {
-            Err(anyhow!("Invalid server response"))
-        }
+        Err(anyhow!("Invalid server response"))
     }
 }
 
@@ -412,37 +332,19 @@ pub async fn call_tool_with_proof(
 /// Call server tool via HTTP with optional zkfetch proof collection
 pub async fn call_server_tool_with_proof(
     client: &reqwest::Client,
-    agent_a_url: &str,
-    agent_b_url: &str,
-    payment_agent_url: Option<&str>,
+    server_url: &str,
     zkfetch_wrapper_url: Option<&str>,
     tool_name: &str,
     arguments: Value,
     attestation_config: Option<AttestationConfig>,
 ) -> Result<(String, Option<CryptographicProof>)> {
-    let agent_b_tools = [
-        "get-ticket-price",
-        "book-flight",
-    ];
-    
-    let payment_tools = [
-        "enroll-card",
-        "initiate-purchase-instruction",
-        "retrieve-payment-credentials",
-    ];
-    
-    if agent_b_tools.contains(&tool_name) {
-        // Agent B tools - use zkfetch-wrapper if available to get proof
-        return call_tool_with_proof(client, agent_b_url, zkfetch_wrapper_url, tool_name, arguments, attestation_config).await;
+    // Use zkfetch-wrapper if available to get proof
+    if zkfetch_wrapper_url.is_some() {
+        return call_tool_with_proof(client, server_url, zkfetch_wrapper_url, tool_name, arguments, attestation_config).await;
     }
     
-    if payment_tools.contains(&tool_name) && payment_agent_url.is_some() {
-        // Payment Agent tools - use zkfetch-wrapper if available to get proof
-        return call_tool_with_proof(client, payment_agent_url.unwrap(), zkfetch_wrapper_url, tool_name, arguments, attestation_config).await;
-    }
-    
-    // For non-Agent-B tools, use direct calls (backward compatibility)
-    call_server_tool(client, agent_a_url, agent_b_url, payment_agent_url, tool_name, arguments)
+    // Fallback: Direct call without proof
+    call_server_tool(client, server_url, tool_name, arguments)
         .await
         .map(|result| (result, None))
 }

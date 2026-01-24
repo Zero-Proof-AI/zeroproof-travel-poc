@@ -454,12 +454,9 @@ pub async fn process_user_query(
                             state.step = "enrollment".to_string();
                             send_progress(&progress_tx, "🔐 Enrolling card for payment... (Please wait, it takes time to generate ZKP)").await;
 
-                            // Enroll card
-                            let payment_agent_url = if config.payment_agent_enabled {
-                                config.payment_agent_url.as_deref()
-                            } else {
-                                None
-                            };
+                            // Enroll card - payment_agent_url is required for payment
+                            let payment_agent_url = config.payment_agent_url.as_deref()
+                                .expect("Payment agent URL required for card enrollment");
 
                             let enrollment_result = enroll_card_if_needed(
                                 &config,
@@ -504,11 +501,8 @@ pub async fn process_user_query(
 
                             send_progress(&progress_tx, &format!("💳 Initiating payment for ${:.2}...(Please wait, it takes time to generate ZKP)", price)).await;
                             
-                            let payment_agent_url = if config.payment_agent_enabled {
-                                config.payment_agent_url.as_deref()
-                            } else {
-                                None
-                            };
+                            let payment_agent_url = config.payment_agent_url.as_deref()
+                                .expect("Payment agent URL required for payment initiation");
 
                             match initiate_payment(
                                 config,
@@ -547,11 +541,8 @@ pub async fn process_user_query(
 
                             send_progress(&progress_tx, "🔑 Retrieving payment credentials...").await;
 
-                            let payment_agent_url = if config.payment_agent_enabled {
-                                config.payment_agent_url.as_deref()
-                            } else {
-                                None
-                            };
+                            let payment_agent_url = config.payment_agent_url.as_deref()
+                                .expect("Payment agent URL required for credential retrieval");
 
                             match retrieve_payment_credentials(
                                 config,
@@ -559,6 +550,8 @@ pub async fn process_user_query(
                                 &enrollment_token_id,
                                 &instruction_id,
                                 payment_agent_url,
+                                state,
+                                progress_tx.clone(),
                             ).await {
                                 Ok(_) => {
                                     println!("[ORCHESTRATION] Payment credentials retrieved");
@@ -650,11 +643,17 @@ Reply with 'retry' to try again, or 'restart' to begin over.", e);
                         for (tool_name, arguments) in &tool_calls {
                             send_progress(&progress_tx, &format!("🔧 Calling tool: {}", tool_name)).await;
                             
+                            // Determine which server to call based on tool name
+                            let target_url = match tool_name.as_str() {
+                                "enroll-card" | "initiate-purchase-instruction" | "retrieve-payment-credentials" => {
+                                    payment_agent_url.unwrap_or(&agent_b_url)
+                                },
+                                _ => &agent_b_url,
+                            };
+                            
                             match call_server_tool(
                                 &client,
-                                &config.server_url,
-                                &agent_b_url,
-                                payment_agent_url,
+                                target_url,
                                 tool_name,
                                 arguments.clone(),
                             )

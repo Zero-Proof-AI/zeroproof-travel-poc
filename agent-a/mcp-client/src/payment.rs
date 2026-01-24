@@ -4,7 +4,7 @@
 use anyhow::{Result, anyhow};
 use serde_json::{json, Value};
 use crate::orchestration::{AgentConfig, BookingState};
-use crate::shared::{call_server_tool, call_server_tool_with_proof, AttestationConfig};
+use crate::shared::{call_server_tool, call_server_tool_with_proof, AttestationConfig, send_proof_to_ui};
 use regex::Regex;
 
 /// Parse and verify enroll-card response
@@ -51,14 +51,11 @@ fn parse_enroll_card_response(result: &str) -> Result<String> {
 pub async fn enroll_card_if_needed(
     config: &AgentConfig,
     session_id: &str,
-    payment_agent_url: Option<&str>,
+    payment_agent_url: &str,
     state: &mut BookingState,
     progress_tx: Option<tokio::sync::mpsc::Sender<String>>,
 ) -> Result<(String, bool)> {
     let client = reqwest::Client::new();
-
-    let agent_b_url = std::env::var("AGENT_B_MCP_URL")
-        .unwrap_or_else(|_| "http://localhost:8001".to_string());
 
     let zkfetch_wrapper_url = config.zkfetch_wrapper_url.as_deref();
 
@@ -66,22 +63,20 @@ pub async fn enroll_card_if_needed(
     let mut enrollment_complete = false;
 
     // Check if card is already enrolled
-    if let Some(payment_url) = payment_agent_url {
-        let session_url = format!("{}/session/{}", payment_url, session_id);
+    let session_url = format!("{}/session/{}", payment_agent_url, session_id);
 
-        if let Ok(response) = client.get(&session_url).send().await {
-            if let Ok(session_data) = response.json::<Value>().await {
-                if let Some(data) = session_data.get("data") {
-                    if let Some(token_count) = data.get("enrolledTokenCount").and_then(|c| c.as_u64()) {
-                        if token_count > 0 {
-                            enrollment_complete = true;
-                            if let Some(token_ids) = data.get("enrolledTokenIds").and_then(|ids| ids.as_array()) {
-                                if let Some(first_token) = token_ids.first().and_then(|t| t.as_str()) {
-                                    enrollment_token_id = first_token.to_string();
-                                }
+    if let Ok(response) = client.get(&session_url).send().await {
+        if let Ok(session_data) = response.json::<Value>().await {
+            if let Some(data) = session_data.get("data") {
+                if let Some(token_count) = data.get("enrolledTokenCount").and_then(|c| c.as_u64()) {
+                    if token_count > 0 {
+                        enrollment_complete = true;
+                        if let Some(token_ids) = data.get("enrolledTokenIds").and_then(|ids| ids.as_array()) {
+                            if let Some(first_token) = token_ids.first().and_then(|t| t.as_str()) {
+                                enrollment_token_id = first_token.to_string();
                             }
-                            return Ok((enrollment_token_id, enrollment_complete));
                         }
+                        return Ok((enrollment_token_id, enrollment_complete));
                     }
                 }
             }
@@ -89,7 +84,7 @@ pub async fn enroll_card_if_needed(
     }
 
     // Card not enrolled yet, need to enroll
-    if !enrollment_complete && payment_agent_url.is_some() {
+    if !enrollment_complete {
         let enroll_args = json!({
             "sessionId": session_id,
             "consumerId": "user_123",
@@ -113,8 +108,6 @@ pub async fn enroll_card_if_needed(
 
         match call_server_tool_with_proof(
             &client,
-            &config.server_url,
-            &agent_b_url,
             payment_agent_url,
             zkfetch_wrapper_url,
             "enroll-card",
@@ -126,34 +119,7 @@ pub async fn enroll_card_if_needed(
             Ok((result, proof)) => {
                 // Collect cryptographic proof if available
                 if let Some(crypto_proof) = proof {
-                    state.cryptographic_traces.push(crypto_proof.clone());
-                    println!("[PROOF] Collected proof for enroll-card: {}", state.cryptographic_traces.len());
-                    
-                    // Send proof to UI via progress channel with all available metadata
-                    if let Some(tx) = &progress_tx {
-                        let mut proof_msg = serde_json::json!({
-                            "tool_name": crypto_proof.tool_name,
-                            "timestamp": crypto_proof.timestamp,
-                            "verified": crypto_proof.verified,
-                            "onchain_compatible": crypto_proof.onchain_compatible,
-                            "proof_id": format!("{}_{}", session_id, crypto_proof.timestamp),
-                            "request": crypto_proof.request,
-                            "response": crypto_proof.response,
-                            "proof": crypto_proof.proof,
-                            "session_id": session_id,
-                        });
-                        
-                        // Add workflow_stage and submitted_by from attestation config
-                        if let Some(config_ref) = &attestation_config {
-                            if let Some(stage) = &config_ref.workflow_stage {
-                                proof_msg["workflow_stage"] = serde_json::json!(stage);
-                            }
-                            proof_msg["submitted_by"] = serde_json::json!(&config_ref.submitted_by);
-                        }
-                        
-                        let _ = tx.send(format!("__PROOF__{}", proof_msg.to_string())).await;
-                    }
-                    // Proof submission is now handled automatically by ProxyFetch via attestation_config
+                    send_proof_to_ui(crypto_proof, &attestation_config, session_id, state, &progress_tx).await;
                 }
 
                 match parse_enroll_card_response(&result) {
@@ -180,55 +146,48 @@ pub async fn initiate_payment(
     session_id: &str,
     enrollment_token_id: &str,
     price: f64,
-    payment_agent_url: Option<&str>,
+    payment_agent_url: &str,
 ) -> Result<String> {
     let client = reqwest::Client::new();
 
-    let agent_b_url = std::env::var("AGENT_B_MCP_URL")
-        .unwrap_or_else(|_| "http://localhost:8001".to_string());
-
     let mut instruction_id = String::new();
 
-    if payment_agent_url.is_some() {
-        let purchase_args = json!({
-            "sessionId": session_id,
-            "consumerId": "user_123",
-            "tokenId": enrollment_token_id,
-            "amount": price.to_string(),
-            "merchant": "ZeroProof Travel"
-        });
+    let purchase_args = json!({
+        "sessionId": session_id,
+        "consumerId": "user_123",
+        "tokenId": enrollment_token_id,
+        "amount": price.to_string(),
+        "merchant": "ZeroProof Travel"
+    });
 
-        // NOTE: proofId NOT sent here. Payment-Agent queries attestation service
-        // with sessionId to find pricing proofs and verify amount matches.
-        // Payment-Agent is responsible for proof selection and verification.
+    // NOTE: proofId NOT sent here. Payment-Agent queries attestation service
+    // with sessionId to find pricing proofs and verify amount matches.
+    // Payment-Agent is responsible for proof selection and verification.
 
-        match call_server_tool(
-            &client,
-            &config.server_url,
-            &agent_b_url,
-            payment_agent_url,
-            "initiate-purchase-instruction",
-            purchase_args,
-        )
-        .await
-        {
-            Ok(result) => {
-                if let Ok(purchase_response) = serde_json::from_str::<Value>(&result) {
-                    if let Some(id) = purchase_response
-                        .get("data")
-                        .and_then(|data| data.get("instructionId"))
-                        .or_else(|| purchase_response.get("instructionId"))
-                        .and_then(|id| id.as_str())
-                    {
-                        instruction_id = id.to_string();
-                    } else {
-                        return Err(anyhow!("Could not extract instructionId from payment response"));
-                    }
+    match call_server_tool(
+        &client,
+        payment_agent_url,
+        "initiate-purchase-instruction",
+        purchase_args,
+    )
+    .await
+    {
+        Ok(result) => {
+            if let Ok(purchase_response) = serde_json::from_str::<Value>(&result) {
+                if let Some(id) = purchase_response
+                    .get("data")
+                    .and_then(|data| data.get("instructionId"))
+                    .or_else(|| purchase_response.get("instructionId"))
+                    .and_then(|id| id.as_str())
+                {
+                    instruction_id = id.to_string();
+                } else {
+                    return Err(anyhow!("Could not extract instructionId from payment response"));
                 }
             }
-            Err(e) => {
-                return Err(anyhow!("Payment initiation error: {}", e));
-            }
+        }
+        Err(e) => {
+            return Err(anyhow!("Payment initiation error: {}", e));
         }
     }
 
@@ -241,14 +200,15 @@ pub async fn retrieve_payment_credentials(
     session_id: &str,
     enrollment_token_id: &str,
     instruction_id: &str,
-    payment_agent_url: Option<&str>,
+    payment_agent_url: &str,
+    state: &mut BookingState,
+    progress_tx: Option<tokio::sync::mpsc::Sender<String>>,
 ) -> Result<()> {
     let client = reqwest::Client::new();
 
-    let agent_b_url = std::env::var("AGENT_B_MCP_URL")
-        .unwrap_or_else(|_| "http://localhost:8001".to_string());
+    let zkfetch_wrapper_url = config.zkfetch_wrapper_url.as_deref();
 
-    if !instruction_id.is_empty() && payment_agent_url.is_some() {
+    if !instruction_id.is_empty() {
         let retrieve_args = json!({
             "sessionId": session_id,
             "consumerId": "user_123",
@@ -261,17 +221,33 @@ pub async fn retrieve_payment_credentials(
         // proofs during earlier payment steps (enroll-card, initiate-purchase-instruction).
         // This step retrieves the final credentials based on verified payment state.
 
-        match call_server_tool(
+        // Create attestation config with the correct session_id
+        let attestation_url = std::env::var("ATTESTER_URL")
+            .unwrap_or_else(|_| "https://dev.attester.zeroproofai.com".to_string());
+        let attestation_config = Some(AttestationConfig {
+            service_url: attestation_url,
+            enabled: true,
+            workflow_stage: Some("payment_credentials".to_string()),
+            session_id: Some(session_id.to_string()),
+            submitted_by: "agent-a".to_string(),
+        });
+
+        match call_server_tool_with_proof(
             &client,
-            &config.server_url,
-            &agent_b_url,
             payment_agent_url,
+            zkfetch_wrapper_url,
             "retrieve-payment-credentials",
             retrieve_args,
+            attestation_config.clone(),
         )
         .await
         {
-            Ok(_result) => {
+            Ok((result, proof)) => {
+                // Collect cryptographic proof if available
+                if let Some(crypto_proof) = proof {
+                    send_proof_to_ui(crypto_proof, &attestation_config, session_id, state, &progress_tx).await;
+                }
+                
                 // Payment confirmed
                 Ok(())
             }

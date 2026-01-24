@@ -230,6 +230,10 @@ async fn book_flight(
 ) -> Result<Json<ToolResponse<BookResponse>>, (StatusCode, Json<ToolResponse<()>>)> {
     tracing::info!("[BOOK-FLIGHT] Tool call received: from={}, to={}, passenger={}, email={}", req.from, req.to, req.passenger_name, req.passenger_email);
     
+    // Get zkfetch URL from environment
+    let zkfetch_url = std::env::var("ZKFETCH_WRAPPER_URL")
+        .unwrap_or_else(|_| "http://localhost:8003".to_string());
+
     // Validate input with specific error messages
     let mut missing_fields = Vec::new();
     
@@ -258,9 +262,8 @@ async fn book_flight(
         ));
     }
 
-    // Get zkfetch URL from environment
-    let zkfetch_url = std::env::var("ZKFETCH_WRAPPER_URL")
-        .unwrap_or_else(|_| "http://localhost:8003".to_string());
+    // Verify proof to make sure agent-a did send payment request and it's approved
+
 
     // Session_id must be provided by agent-a for proof tracking across the workflow
     let session_id = req.session_id.clone()

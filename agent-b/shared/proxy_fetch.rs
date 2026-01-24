@@ -651,7 +651,7 @@ impl ProxyFetch {
         request_body: Value,
         request_url: String,
     ) {
-        let tool_name_str = tool_name.unwrap_or_else(|| "unknown-tool".to_string());
+        let tool_name_str = tool_name.unwrap_or_else(|| "direct-fetch".to_string());
         
         println!("[PROXY_FETCH] zkfetch_response for {}: {}", tool_name_str, serde_json::to_string_pretty(&zkfetch_response).unwrap_or_default());
         
@@ -678,6 +678,9 @@ impl ProxyFetch {
                 .clone()
                 .or_else(|| Some("general".to_string()));
 
+            // Check if onchainProof exists in response - if yes, proof is on-chain compatible
+            let onchain_compatible = zkfetch_response.get("onchainProof").is_some();
+
             // Spawn background task to submit proof
             let service_url = attestation_config.service_url.clone();
             let tool_name_clone = tool_name_str.clone();
@@ -696,11 +699,14 @@ impl ProxyFetch {
                         "url": request_url,
                         "body": request_body,
                     }),
-                    response: response_body,
-                    proof: proof_json,
+                    response: response_body.clone(),
+                    proof: json!({
+                        "proof": proof_json,
+                        "onchainProof": response_body.get("onchainProof").cloned(),
+                    }),
                     proof_id: None,
-                    verified: true,  // zkfetch proofs are cryptographically verified
-                    onchain_compatible: true,  // ZK-TLS proofs can be verified on-chain
+                    verified: false,
+                    onchain_compatible,
                     display_response: None,
                     redaction_metadata: None,
                 };
@@ -919,7 +925,7 @@ mod tests {
         };
         let proxy = ProxyFetch::new(config).unwrap();
 
-        let resolved = proxy.resolve_tool_options(&Some("unknown-tool".to_string()));
+        let resolved = proxy.resolve_tool_options(&Some("direct-fetch".to_string()));
         assert_eq!(resolved.public_options, Some(json!({"timeout": 15000})));
     }
 

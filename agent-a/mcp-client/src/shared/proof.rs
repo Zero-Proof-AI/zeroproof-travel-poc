@@ -5,6 +5,50 @@ use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+/// Collect and send cryptographic proof to UI via progress channel
+/// 
+/// This function:
+/// - Pushes the proof to BookingState's cryptographic_traces
+/// - Builds a JSON message with all metadata
+/// - Adds workflow_stage and submitted_by from attestation config
+/// - Sends it to the UI via the progress channel with __PROOF__ prefix
+pub async fn send_proof_to_ui(
+    crypto_proof: CryptographicProof,
+    attestation_config: &Option<crate::shared::AttestationConfig>,
+    session_id: &str,
+    state: &mut crate::orchestration::BookingState,
+    progress_tx: &Option<tokio::sync::mpsc::Sender<String>>,
+) {
+    state.cryptographic_traces.push(crypto_proof.clone());
+    println!("[PROOF] Collected proof for {}: {}", crypto_proof.tool_name, state.cryptographic_traces.len());
+    
+    // Send proof to UI via progress channel with all available metadata
+    if let Some(tx) = progress_tx {
+        let mut proof_msg = json!({
+            "tool_name": crypto_proof.tool_name,
+            "timestamp": crypto_proof.timestamp,
+            "verified": crypto_proof.verified,
+            "onchain_compatible": crypto_proof.onchain_compatible,
+            "proof_id": format!("{}_{}", session_id, crypto_proof.timestamp),
+            "request": crypto_proof.request,
+            "response": crypto_proof.response,
+            "proof": crypto_proof.proof,
+            "session_id": session_id,
+        });
+        
+        // Add workflow_stage and submitted_by from attestation config
+        if let Some(config_ref) = attestation_config {
+            if let Some(stage) = &config_ref.workflow_stage {
+                proof_msg["workflow_stage"] = json!(stage);
+            }
+            proof_msg["submitted_by"] = json!(&config_ref.submitted_by);
+        }
+        
+        let _ = tx.send(format!("__PROOF__{}", proof_msg.to_string())).await;
+    }
+    // Proof submission is now handled automatically by ProxyFetch via attestation_config
+}
+
 /// Metadata tracking which fields were redacted from a proof
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RedactionMetadata {

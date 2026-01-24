@@ -82,6 +82,9 @@ export const ProofsProvider: React.FC<ProofsProviderProps> = ({
         // Handle proof messages from attestation service
         if (data.proofs && Array.isArray(data.proofs)) {
           console.log('[PROOFS_CONTEXT] Proofs received:', data.proofs.length);
+          data.proofs.forEach((p: CryptographicProof, idx: number) => {
+            console.log(`[PROOFS_CONTEXT]   Proof ${idx}: verified=${p.verified}, tool=${p.tool_name}, onchain=${p.onchain_compatible}`);
+          });
           // Append new proofs to existing ones
           setProofs((prevProofs) => {
             // Avoid duplicates by checking proof_id
