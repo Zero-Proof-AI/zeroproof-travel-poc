@@ -146,7 +146,7 @@ pub async fn complete_booking(
     // This function now focuses on: flight booking only
 
     // Complete the flight booking
-    send_progress(&progress_tx, &format!("🛫 Booking flight from {} to {}...", from, to)).await;
+    send_progress(&progress_tx, &format!("🛫 Booking flight from {} to {}...)", from, to)).await;
     let book_args = json!({
         "from": from,
         "to": to,
@@ -167,6 +167,7 @@ pub async fn complete_booking(
             submitted_by: "agent-a".to_string(),
         });
 
+        send_progress(&progress_tx, &format!("(Please wait, it takes time to generate ZKP)")).await;
         match call_server_tool_with_proof(
             &client,
             &agent_b_url,

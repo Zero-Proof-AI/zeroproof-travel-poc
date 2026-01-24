@@ -96,11 +96,13 @@ pub fn build_tool_options_map() -> ToolOptionsMap {
         },
     );
 
-    // retrieve-payment-credentials: Payment credential retrieval - redact all sensitive data
-    // Reveals ONLY: credentials
-    // Hides: tokenId, instructionId, and other identifiers from proof
+    // retrieve-payment-credentials: Payment credential retrieval - redact sensitive identifiers
+    // Reveals ONLY: status, instructionId, authorization (proof of successful payment)
+    // Hides: tokenId, signedPayload, and other sensitive identifiers from proof
     let mut credentials_paths = HashMap::new();
-    credentials_paths.insert("credentials".to_string(), "$.data.credentials".to_string());
+    credentials_paths.insert("status".to_string(), "$.data.status".to_string());
+    credentials_paths.insert("instructionId".to_string(), "$.data.instructionId".to_string());
+    credentials_paths.insert("authorization".to_string(), "$.data.authorization".to_string());
     
     map.insert(
         "retrieve-payment-credentials".to_string(),
@@ -108,11 +110,13 @@ pub fn build_tool_options_map() -> ToolOptionsMap {
             public_options: None,
             // Use private_options to hide sensitive identifiers from proof
             private_options: Some(json!({
-                "hiddenParameters": ["tokenId", "instructionId"]
+                "hiddenParameters": ["tokenId", "signedPayload", "transactionReferenceId"]
             })),
-            // Select ONLY the credentials - everything else is redacted
+            // Select ONLY the fields that prove payment was successful - everything else is redacted
             redactions: Some(vec![
-                json!({"jsonPath": "$.data.credentials"}),
+                json!({"jsonPath": "$.data.status"}),
+                json!({"jsonPath": "$.data.instructionId"}),
+                json!({"jsonPath": "$.data.authorization"}),
             ]),
             response_redaction_paths: Some(credentials_paths),
         },

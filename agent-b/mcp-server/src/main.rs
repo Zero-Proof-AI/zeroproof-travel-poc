@@ -16,8 +16,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tower_http::cors::CorsLayer;
 
+mod validate;
+
 use pricing_core::pricing;
 use pricing_core::booking;
+use validate::verify_payment_proof;
 
 /// Pricing Tool Request
 #[derive(Debug, Deserialize)]
@@ -262,9 +265,6 @@ async fn book_flight(
         ));
     }
 
-    // Verify proof to make sure agent-a did send payment request and it's approved
-
-
     // Session_id must be provided by agent-a for proof tracking across the workflow
     let session_id = req.session_id.clone()
         .ok_or_else(|| {
@@ -274,6 +274,23 @@ async fn book_flight(
                 Json(tool_error("Missing required field: 'session_id' (must be provided by orchestrator)".to_string())),
             )
         })?;
+
+    // HARD BLOCK: Verify payment proof from attestation service
+    // This ensures Agent-A actually completed the payment before we book the flight
+    let attestation_url = std::env::var("ATTESTER_URL")
+        .unwrap_or_else(|_| "http://localhost:8002".to_string());
+    
+    if let Err(payment_error) = verify_payment_proof(&session_id, &attestation_url).await {
+        tracing::error!("[BOOK-FLIGHT] Payment verification FAILED: {}", payment_error);
+        return Err((
+            StatusCode::PAYMENT_REQUIRED,
+            Json(tool_error(format!(
+                "Payment verification failed - cannot book flight: {}",
+                payment_error
+            ))),
+        ));
+    }
+    tracing::info!("[BOOK-FLIGHT] ✓ Payment proof verified - proceeding with booking");
 
     // Delegate to pricing-core library handle_async for business logic
     let core_req = booking::Request {

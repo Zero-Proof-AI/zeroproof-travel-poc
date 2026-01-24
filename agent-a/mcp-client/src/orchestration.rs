@@ -539,7 +539,7 @@ pub async fn process_user_query(
                             let enrollment_token_id = state.enrollment_token_id.clone().unwrap_or_default();
                             let instruction_id = state.instruction_id.clone().unwrap_or_default();
 
-                            send_progress(&progress_tx, "🔑 Retrieving payment credentials...").await;
+                            send_progress(&progress_tx, "🔑 Retrieving payment credentials... (Please wait, it takes time to generate ZKP)").await;
 
                             let payment_agent_url = config.payment_agent_url.as_deref()
                                 .expect("Payment agent URL required for credential retrieval");
