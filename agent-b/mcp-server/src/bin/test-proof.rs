@@ -85,7 +85,7 @@ async fn main() {
     println!("\n📋 Starting on-chain verification...\n");
 
     // Call the verification function from shared module
-    match shared::signature::verify_secp256k1_sig(&proof_data, true).await {
+    match shared::signature::verify_secp256k1_sig(&proof_data, true, false).await {
         Ok(()) => {
             println!("\n✅ VERIFICATION PASSED!");
             println!("========================================");
