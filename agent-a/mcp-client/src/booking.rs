@@ -184,16 +184,24 @@ pub async fn complete_booking(
                     send_proof_to_ui(crypto_proof, &attestation_config, &session_id, state, &progress_tx).await;
                 }
                 
-                // Use regex to extract confirmation_code from response
-                let re = Regex::new(r#"\"confirmation_code\"\s*:\s*\"([^\"]+)\""#).unwrap();
+                // DEBUG: Print the full response to understand its format
+                println!("[BOOKING] Booking response:\n{}", result);
+                
+                // Extract confirmation_code from response
+                // The response format has escaped quotes and asterisk separators
+                // Example: "\"booking_id\":\"BK0005A6AE\"*\"status\":\"confirmed\"*\"confirmation_code\":\"Overview\""
+                // Look for: confirmation_code followed by any non-word chars, then capture the word
+                let re = Regex::new(r#"confirmation_code[^:]*:[\s"\\]*([A-Za-z0-9]+)"#).unwrap();
                 if let Some(caps) = re.captures(&result) {
                     if let Some(conf_code) = caps.get(1) {
+                        println!("[BOOKING] ✓ Extracted confirmation code: {}", conf_code.as_str());
                         return Ok(format!(
                             "🎉 Flight Booking Confirmed!\n\nConfirmation Code: {}\n\nYour flight from {} to {} has been successfully booked for {}.\n\nTotal Cost: ${:.2}\n\nA detailed confirmation email has been sent to {}.\n\nYour payment has been securely processed using biometric authentication.",
                             conf_code.as_str(), from, to, passenger_name, price, passenger_email
                         ));
                     }
                 }
+                eprintln!("[BOOKING] Regex didn't match. Response was:\n{}", result);
                 Ok("Failed to book flight: confirmation code not found in response".to_string())
             }
             Err(e) => {
@@ -214,16 +222,24 @@ pub async fn complete_booking(
         .await
         {
             Ok(result) => {
-                // Use regex to extract confirmation_code from response
-                let re = Regex::new(r#"\"confirmation_code\"\s*:\s*\"([^\"]+)\""#).unwrap();
+                // DEBUG: Print the full response to understand its format
+                println!("[BOOKING] Booking response:\n{}", result);
+                
+                // Extract confirmation_code from response
+                // The response format has escaped quotes and asterisk separators
+                // Example: "\"booking_id\":\"BK0005A6AE\"*\"status\":\"confirmed\"*\"confirmation_code\":\"Overview\""
+                // Look for: confirmation_code followed by any non-word chars, then capture the word
+                let re = Regex::new(r#"confirmation_code[^:]*:[\s"\\]*([A-Za-z0-9]+)"#).unwrap();
                 if let Some(caps) = re.captures(&result) {
                     if let Some(conf_code) = caps.get(1) {
+                        println!("[BOOKING] ✓ Extracted confirmation code: {}", conf_code.as_str());
                         return Ok(format!(
                             "🎉 Flight Booking Confirmed!\n\nConfirmation Code: {}\n\nYour flight from {} to {} has been successfully booked for {}.\n\nTotal Cost: ${:.2}\n\nA detailed confirmation email has been sent to {}.\n\nYour payment has been securely processed using biometric authentication.",
                             conf_code.as_str(), from, to, passenger_name, price, passenger_email
                         ));
                     }
                 }
+                eprintln!("[BOOKING] Regex didn't match. Response was:\n{}", result);
                 Ok("Failed to book flight: confirmation code not found in response".to_string())
             }
             Err(e) => {

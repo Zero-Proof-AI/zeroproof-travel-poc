@@ -348,7 +348,11 @@ impl ProxyFetch {
     /// # Errors
     /// Returns an error if the HTTP client cannot be created
     pub fn new(config: ProxyConfig) -> Result<Self> {
-        let client = Client::new();
+        // Create HTTP client with extended timeout for proof generation and booking operations
+        // Proof generation can take time, so we set a generous timeout
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(900)) // 15 minutes timeout for proof generation
+            .build()?;
         Ok(Self { config, client })
     }
 
@@ -669,7 +673,7 @@ impl ProxyFetch {
                 .session_id
                 .clone()
                 .unwrap_or_else(|| {
-                    format!("agent-b-{}-{}", tool_name_str, chrono::Local::now().timestamp())
+                    format!("agent-{}-{}", tool_name_str, chrono::Local::now().timestamp())
                 });
 
             // Use provided workflow stage or default to "general"
