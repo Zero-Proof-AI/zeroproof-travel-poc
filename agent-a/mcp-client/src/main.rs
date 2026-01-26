@@ -318,6 +318,16 @@ async fn handle_websocket(socket: WebSocket, sessions: SessionManager) {
             Ok(Message::Text(text)) => {
                 println!("[WEBSOCKET] Received message: {}", text);
                 
+                // Check if this is a heartbeat ping message (transparent heartbeat)
+                if let Ok(ping_msg) = serde_json::from_str::<serde_json::Value>(&text) {
+                    if ping_msg.get("type").and_then(|v| v.as_str()) == Some("ping") {
+                        // Send pong response silently
+                        let pong_msg = serde_json::json!({ "type": "pong" });
+                        let _ = sender.lock().await.send(Message::Text(pong_msg.to_string())).await;
+                        continue;
+                    }
+                }
+                
                 // Parse incoming message
                 let chat_request: Result<ChatRequest, _> = serde_json::from_str(&text);
                 match chat_request {

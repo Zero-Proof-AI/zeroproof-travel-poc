@@ -249,6 +249,12 @@ const ChatInterface: React.FC = () => {
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
+        
+        // Skip heartbeat pong messages silently
+        if (data.type === 'pong') {
+          return;
+        }
+
         console.log('[WEBSOCKET] Received:', data);
 
         // Store server-returned session ID
