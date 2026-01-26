@@ -4,6 +4,11 @@ import ProgressPanel from './ProgressPanel';
 import { ProofBadge, ProofModal, ProofsProvider, useProofs, type FullProofData } from './proof';
 import ChatBox from './ChatBox';
 
+// Backend URLs
+// const AI_AGENT_BASE_URL = 'http://localhost:3001';
+// Test Environment
+const AI_AGENT_BASE_URL = 'https://dev.agenta.zeroproofai.com';
+
 interface ChatMessage {
   role: string;
   content: string;
@@ -209,15 +214,10 @@ const ChatInterface: React.FC = () => {
     };
   }, []);
 
-  // Backend URLs
-  const baseUrl = 'http://localhost:3001';
-  // Test Environment
-  // const baseUrl = 'https://dev.agenta.zeroproofai.com';
-
-  const wsUrl = baseUrl.replace('https://', 'wss://').replace('http://', 'ws://');
+  const wsUrl = AI_AGENT_BASE_URL.replace('https://', 'wss://').replace('http://', 'ws://');
 
   console.log('[APP] UI Agent Configuration:');
-  console.log('[APP]   Base URL (HTTP):', baseUrl);
+  console.log('[APP]   Base URL (HTTP):', AI_AGENT_BASE_URL);
 
   // WebSocket connection management for chat
   const connectWebSocket = () => {
