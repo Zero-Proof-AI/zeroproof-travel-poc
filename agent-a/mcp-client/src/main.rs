@@ -417,8 +417,19 @@ async fn handle_websocket(socket: WebSocket, sessions: SessionManager) {
                 println!("[WEBSOCKET] Connection closed by client");
                 break;
             }
+            Ok(Message::Ping(payload)) => {
+                println!("[WEBSOCKET] Received ping, sending pong");
+                if let Err(e) = sender.lock().await.send(Message::Pong(payload)).await {
+                    println!("[WEBSOCKET] Error sending pong: {}", e);
+                    break;
+                }
+            }
+            Ok(Message::Pong(_)) => {
+                println!("[WEBSOCKET] Received pong");
+                // Heartbeat acknowledged
+            }
             Ok(_) => {
-                // Ignore other message types (ping, pong, binary, etc.)
+                // Ignore other message types (binary, etc.)
             }
             Err(e) => {
                 println!("[WEBSOCKET] WebSocket error: {}", e);

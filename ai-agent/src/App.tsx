@@ -188,6 +188,7 @@ const ChatInterface: React.FC = () => {
   const messagesEndRef = React.useRef<HTMLDivElement>(null);
   const progressPanelRef = React.useRef<HTMLDivElement>(null);
   const inputRef = React.useRef<HTMLInputElement>(null);
+  const heartbeatIntervalRef = React.useRef<NodeJS.Timeout | null>(null);
 
   // Add animation styles
   React.useEffect(() => {
@@ -232,6 +233,17 @@ const ChatInterface: React.FC = () => {
       console.log('[WEBSOCKET] Connected');
       setWsConnected(true);
       setSocket(ws);
+
+      // Start heartbeat to keep connection alive
+      if (heartbeatIntervalRef.current) {
+        clearInterval(heartbeatIntervalRef.current);
+      }
+      heartbeatIntervalRef.current = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          console.log('[WEBSOCKET] Sending heartbeat');
+          ws.send(JSON.stringify({ type: 'ping' }));
+        }
+      }, 30000); // Send heartbeat every 30 seconds
     };
 
     ws.onmessage = (event) => {
@@ -311,6 +323,10 @@ const ChatInterface: React.FC = () => {
       console.log('[WEBSOCKET] Disconnected');
       setWsConnected(false);
       setSocket(null);
+      if (heartbeatIntervalRef.current) {
+        clearInterval(heartbeatIntervalRef.current);
+        heartbeatIntervalRef.current = null;
+      }
     };
 
     ws.onerror = (error) => {
@@ -324,6 +340,10 @@ const ChatInterface: React.FC = () => {
       socket.close();
       setSocket(null);
       setWsConnected(false);
+    }
+    if (heartbeatIntervalRef.current) {
+      clearInterval(heartbeatIntervalRef.current);
+      heartbeatIntervalRef.current = null;
     }
   };
 
