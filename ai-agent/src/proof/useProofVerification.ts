@@ -8,6 +8,7 @@ export const useProofVerification = () => {
   const { address, isConnected } = useConnection();
   const [isVerifying, setIsVerifying] = useState(false);
   const [verifiedProofIds, setVerifiedProofIds] = useState<Set<string>>(new Set());
+  const [verificationError, setVerificationError] = useState<string | null>(null);
 
   // Check and switch network if needed
   const ensureSepoliaNetwork = async (ethereumProvider: any) => {
@@ -178,7 +179,7 @@ export const useProofVerification = () => {
           signedClaim.signatures,
         ],
       ];
-      console.log('   Proof structure:', JSON.stringify(proofStructure, null, 2));
+      // console.log('   Proof structure:', JSON.stringify(proofStructure, null, 2));
 
       const encodedData = iface.encodeFunctionData('verifyProof', [proofStructure]);
       console.log('   📝 Encoded function data:', encodedData);
@@ -324,9 +325,13 @@ export const useProofVerification = () => {
 
       if (verified) {
         console.log('✅ Proof verified on-chain!');
+        setVerificationError(null);
         setVerifiedProofIds(prev => new Set(prev).add(selectedProof.proof_id));
       } else {
-        console.log('❌ On-chain verification failed');
+        const errorMsg = `On-chain verification failed - transaction reverted (status: ${receipt.status})`;
+        console.error(errorMsg);
+        setVerificationError(errorMsg);
+        throw new Error(errorMsg);
       }
     } catch (error) {
       console.error('Verification error:', error);
@@ -340,13 +345,15 @@ export const useProofVerification = () => {
         errorMessage.includes('4001')
       ) {
         console.log('User cancelled the signature request');
+        setVerificationError(null);
       } else {
         console.error('Verification error:', errorMessage);
+        setVerificationError(errorMessage);
       }
     } finally {
       setIsVerifying(false);
     }
   };
 
-  return { handleVerify, isVerifying, isConnected, address, verifiedProofIds };
+  return { handleVerify, isVerifying, isConnected, address, verifiedProofIds, verificationError, setVerificationError };
 };

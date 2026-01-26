@@ -32,7 +32,7 @@ interface ProofModalProps {
 }
 
 const ProofModal: React.FC<ProofModalProps> = React.memo(({ open, selectedProof, onClose }) => {
-  const { handleVerify, isVerifying, isConnected, verifiedProofIds } = useProofVerification();
+  const { handleVerify, isVerifying, isConnected, verifiedProofIds, verificationError, setVerificationError } = useProofVerification();
   const isVerified = selectedProof ? verifiedProofIds.has(selectedProof.proof_id) : false;
 
   if (!open || !selectedProof) return null;
@@ -190,11 +190,16 @@ const ProofModal: React.FC<ProofModalProps> = React.memo(({ open, selectedProof,
               <strong>Click to expand proof data</strong> (for on-chain verification)
             </summary>
             <button
-              onClick={() => handleVerify(selectedProof)}
+              onClick={() => {
+                setVerificationError(null);
+                handleVerify(selectedProof);
+              }}
               style={{ 
                 marginTop: '0.5rem',
                 background: isVerified
                   ? '#10b981'
+                  : verificationError
+                  ? '#ef4444'
                   : isVerifying
                   ? '#6b7280'
                   : '#3b82f6', 
@@ -204,26 +209,40 @@ const ProofModal: React.FC<ProofModalProps> = React.memo(({ open, selectedProof,
                 padding: '0.5rem 1rem',
                 fontSize: '0.9em', 
                 fontWeight: '500',
-                cursor: isVerified || isVerifying ? 'not-allowed' : 'pointer',
-                opacity: isVerified || isVerifying ? 0.7 : 1,
+                cursor: (isVerified || isVerifying) && !verificationError ? 'not-allowed' : 'pointer',
+                opacity: (isVerified || isVerifying) && !verificationError ? 0.7 : 1,
                 transition: 'all 0.2s ease',
               }}
               onMouseEnter={(e) => {
-                if (!isVerifying && !isVerified) {
+                if (!isVerifying && !isVerified && !verificationError) {
                   e.currentTarget.style.opacity = '0.9';
                   e.currentTarget.style.transform = 'translateY(-2px)';
                 }
               }}
               onMouseLeave={(e) => {
-                if (!isVerifying && !isVerified) {
+                if (!isVerifying && !isVerified && !verificationError) {
                   e.currentTarget.style.opacity = '1';
                   e.currentTarget.style.transform = 'translateY(0)';
                 }
               }}
-              disabled={isVerifying || isVerified}
+              disabled={isVerifying || (isVerified && !verificationError)}
             >
-              {isVerified ? '✅ Verified' : isVerifying ? '🔄 Verifying...' : 'Verify'}
+              {isVerified && !verificationError ? '✅ Verified' : verificationError ? '❌ Failed - Try Again' : isVerifying ? '🔄 Verifying...' : 'Verify'}
             </button>
+            {verificationError && (
+              <div style={{ 
+                marginTop: '0.75rem', 
+                padding: '0.75rem', 
+                background: '#fee2e2', 
+                border: '1px solid #fecaca', 
+                borderRadius: '0.25rem', 
+                color: '#991b1b',
+                fontSize: '0.85rem'
+              }}>
+                <strong style={{ display: 'block', marginBottom: '0.25rem' }}>❌ Verification Failed</strong>
+                <p style={{ margin: 0 }}>{verificationError}</p>
+              </div>
+            )}
             <pre style={{ background: '#f7fafc', padding: '0.75rem', borderRadius: '0.25rem', fontSize: '0.75rem', overflow: 'auto', maxHeight: '300px', marginTop: '0.5rem' }}>
               {JSON.stringify(selectedProof.proof?.onchainProof || selectedProof.proof, null, 2)}
             </pre>
