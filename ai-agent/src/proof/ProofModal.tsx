@@ -32,7 +32,8 @@ interface ProofModalProps {
 }
 
 const ProofModal: React.FC<ProofModalProps> = React.memo(({ open, selectedProof, onClose }) => {
-  const { handleVerify, isVerifying, isConnected, isVerified } = useProofVerification();
+  const { handleVerify, isVerifying, isConnected, verifiedProofIds } = useProofVerification();
+  const isVerified = selectedProof ? verifiedProofIds.has(selectedProof.proof_id) : false;
 
   if (!open || !selectedProof) return null;
   

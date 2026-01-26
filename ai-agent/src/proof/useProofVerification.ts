@@ -7,7 +7,7 @@ export const useProofVerification = () => {
   const { connect, connectors } = useConnect();
   const { address, isConnected } = useConnection();
   const [isVerifying, setIsVerifying] = useState(false);
-  const [isVerified, setIsVerified] = useState(false);
+  const [verifiedProofIds, setVerifiedProofIds] = useState<Set<string>>(new Set());
 
   // Check and switch network if needed
   const ensureSepoliaNetwork = async (ethereumProvider: any) => {
@@ -324,7 +324,7 @@ export const useProofVerification = () => {
 
       if (verified) {
         console.log('✅ Proof verified on-chain!');
-        setIsVerified(true);
+        setVerifiedProofIds(prev => new Set(prev).add(selectedProof.proof_id));
       } else {
         console.log('❌ On-chain verification failed');
       }
@@ -348,5 +348,5 @@ export const useProofVerification = () => {
     }
   };
 
-  return { handleVerify, isVerifying, isConnected, address, isVerified };
+  return { handleVerify, isVerifying, isConnected, address, verifiedProofIds };
 };

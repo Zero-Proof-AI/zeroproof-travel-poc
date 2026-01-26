@@ -1,5 +1,9 @@
 import React, { createContext, useState, useEffect, useCallback } from 'react';
 
+// Attestation Service Configuration
+// const ATTESTATION_SERVICE_URL = 'http://localhost:8000';
+const ATTESTATION_SERVICE_URL = 'https://dev.attester.zeroproofai.com';
+
 export interface CryptographicProof {
   tool_name: string;
   timestamp: number;
@@ -28,19 +32,18 @@ export const ProofsContext = createContext<ProofsContextType | undefined>(undefi
 
 interface ProofsProviderProps {
   children: React.ReactNode;
-  attestationServiceUrl: string;
   sessionId?: string;
 }
 
 export const ProofsProvider: React.FC<ProofsProviderProps> = ({
   children,
-  attestationServiceUrl,
   sessionId,
 }) => {
   const [proofs, setProofs] = useState<CryptographicProof[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [socket, setSocket] = useState<WebSocket | null>(null);
+  const attestationServiceUrl = ATTESTATION_SERVICE_URL;
 
   // Connect to proofs WebSocket when sessionId is available
   useEffect(() => {

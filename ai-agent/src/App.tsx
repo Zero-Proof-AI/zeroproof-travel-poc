@@ -211,16 +211,13 @@ const ChatInterface: React.FC = () => {
 
   // Backend URLs
   const baseUrl = 'http://localhost:3001';
-  // const attestationServiceUrl = 'http://localhost:8000'; // Attestation service endpoint
   // Test Environment
   // const baseUrl = 'https://dev.agenta.zeroproofai.com';
-  const attestationServiceUrl = 'https://dev.attester.zeroproofai.com';
 
   const wsUrl = baseUrl.replace('https://', 'wss://').replace('http://', 'ws://');
 
   console.log('[APP] UI Agent Configuration:');
   console.log('[APP]   Base URL (HTTP):', baseUrl);
-  console.log('[APP]   Attestation Service URL:', attestationServiceUrl);
 
   // WebSocket connection management for chat
   const connectWebSocket = () => {
@@ -390,7 +387,7 @@ const ChatInterface: React.FC = () => {
 
 
   return (
-    <ProofsProvider attestationServiceUrl={attestationServiceUrl} sessionId={sessionId}>
+    <ProofsProvider sessionId={sessionId}>
       <div className="app-container" style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
         <header style={{ padding: '1rem', background: '#2d3748', color: '#fff', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div>
