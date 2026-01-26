@@ -229,6 +229,23 @@ const ProofModal: React.FC<ProofModalProps> = React.memo(({ open, selectedProof,
             >
               {isVerified && !verificationError ? '✅ Verified' : verificationError ? '❌ Failed - Try Again' : isVerifying ? '🔄 Verifying...' : 'Verify'}
             </button>
+            {!isVerified && !verificationError && (
+              <div style={{
+                marginTop: '0.5rem',
+                padding: '0.5rem 0.75rem',
+                background: '#fef3c7',
+                border: '1px solid #fde68a',
+                borderRadius: '0.25rem',
+                color: '#92400e',
+                fontSize: '0.8rem',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '0.5rem'
+              }}>
+                <span>⏱️</span>
+                <span><strong>Note:</strong> Verification may take up to 3 minutes to confirm on-chain.</span>
+              </div>
+            )}
             {verificationError && (
               <div style={{ 
                 marginTop: '0.75rem', 

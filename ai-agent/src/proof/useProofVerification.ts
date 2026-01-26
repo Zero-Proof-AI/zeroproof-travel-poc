@@ -203,10 +203,22 @@ export const useProofVerification = () => {
       let gasLimit = 100000; // Default gas limit
 
       try {
-        const feeData = await provider.getFeeData();
-        if (feeData.gasPrice) {
-          gasPrice = feeData.gasPrice;
-          console.log('   ⛽ Gas price:', gasPrice?.toString());
+        // Try to get fee data, but handle networks that don't support EIP-1559
+        try {
+          const feeData = await provider.getFeeData();
+          if (feeData.gasPrice) {
+            gasPrice = feeData.gasPrice;
+            console.log('   ⛽ Gas price:', gasPrice?.toString());
+          }
+        } catch (feeError: any) {
+          // If getFeeData fails (e.g., eth_maxPriorityFeePerGas not supported), fall back to getGasPrice
+          if (feeError.code === -32601 || feeError.message?.includes('eth_maxPriorityFeePerGas')) {
+            console.warn('⚠️ Network does not support EIP-1559, using legacy gas price');
+            gasPrice = await (provider as any).getGasPrice();
+            console.log('   ⛽ Gas price (legacy):', gasPrice?.toString());
+          } else {
+            throw feeError;
+          }
         }
 
         // Estimate gas for the call
@@ -304,7 +316,7 @@ export const useProofVerification = () => {
       console.log('⏳ Waiting for transaction confirmation...');
       let receipt = null;
       let attempts = 0;
-      const maxAttempts = 120; // 2 minutes with 1 second intervals
+      const maxAttempts = 180; // 3 minutes with 1 second intervals
 
       while (!receipt && attempts < maxAttempts) {
         receipt = await provider.getTransactionReceipt(txHash);
@@ -315,7 +327,7 @@ export const useProofVerification = () => {
       }
 
       if (!receipt) {
-        throw new Error('Transaction not confirmed after 2 minutes');
+        throw new Error('Transaction not confirmed after 3 minutes');
       }
 
       const verified = receipt.status === 1;

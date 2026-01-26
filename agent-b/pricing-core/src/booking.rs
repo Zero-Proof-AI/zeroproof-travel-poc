@@ -115,7 +115,7 @@ pub async fn handle_async(req: Request, zkfetch_url: String, session_id: &str) -
             // Use GET method since we're fetching from httpbin.org/json
             match proxy_fetch.get("https://httpbin.org/json").await {
                 Ok(json_response) => {
-                    eprintln!("[BOOKING] ProxyFetch response: {}", serde_json::to_string_pretty(&json_response).unwrap_or_default());
+                    // eprintln!("[BOOKING] ProxyFetch response: {}", serde_json::to_string_pretty(&json_response).unwrap_or_default());
                     
                     // Extract booking confirmation from response
                     if let Some(proof) = json_response.get("proof") {
