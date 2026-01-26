@@ -17,7 +17,7 @@ pub async fn verify_secp256k1_sig(
             verify_onchain_sig(proof_data).await
         }
     } else {
-        verify_sdk_sig(proof_data).await
+        verify_sdk_sig(proof_data)
     }
 }
 
@@ -214,7 +214,9 @@ pub async fn verify_proof_gas_free(
 /// 4. Hashes with keccak256
 /// 5. Recovers the signer from the signature via secp256k1
 /// 6. Compares recovered signer with expected witness
-async fn verify_sdk_sig(
+/// 
+/// NOTE: This is a pure synchronous function - no async I/O operations
+pub fn verify_sdk_sig(
     proof_data: &serde_json::Value,
 ) -> Result<(), String> {
     // Extract claim data and signatures from proof_data

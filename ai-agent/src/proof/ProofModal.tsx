@@ -1,4 +1,5 @@
 import React from 'react';
+import { useProofVerification } from './useProofVerification';
 
 export interface FullProofData {
   proof_id: string;
@@ -31,6 +32,8 @@ interface ProofModalProps {
 }
 
 const ProofModal: React.FC<ProofModalProps> = React.memo(({ open, selectedProof, onClose }) => {
+  const { handleVerify, isVerifying, isConnected, isVerified } = useProofVerification();
+
   if (!open || !selectedProof) return null;
   
   return (
@@ -161,11 +164,65 @@ const ProofModal: React.FC<ProofModalProps> = React.memo(({ open, selectedProof,
 
         {/* ZK-TLS Proof */}
         <div style={{ marginBottom: '1.5rem', paddingBottom: '1rem', borderBottom: '1px solid #e2e8f0' }}>
-          <h3 style={{ color: '#2d3748', marginBottom: '0.75rem' }}>ZK-TLS Proof (Reclaim Protocol)</h3>
+          <h3 style={{ color: '#2d3748', marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            ZK-TLS Proof 
+            <button
+              onClick={() => window.open('https://sepolia.etherscan.io/address/0x9C33252D29B41Fe2706704a8Ca99E8731B58af41#code', '_blank')}
+              style={{ 
+                background: '#2563eb', 
+                color: '#fff', 
+                border: 'none', 
+                borderRadius: '0.25rem', 
+                padding: '0.25rem 0.5rem',
+                fontSize: '0.8em', 
+                cursor: 'pointer',
+                fontWeight: '500'
+              }}
+              // onMouseEnter={(e) => { e.currentTarget.style.background = '#1d4ed8'; }}
+              // onMouseLeave={(e) => { e.currentTarget.style.background = '#2563eb'; }}
+            >
+              See contract
+            </button>
+          </h3>
           <details style={{ cursor: 'pointer' }}>
             <summary style={{ padding: '0.5rem', background: '#f7fafc', borderRadius: '0.25rem', userSelect: 'none' }}>
               <strong>Click to expand proof data</strong> (for on-chain verification)
             </summary>
+            <button
+              onClick={() => handleVerify(selectedProof)}
+              style={{ 
+                marginTop: '0.5rem',
+                background: isVerified
+                  ? '#10b981'
+                  : isVerifying
+                  ? '#6b7280'
+                  : '#3b82f6', 
+                color: '#fff', 
+                border: 'none', 
+                borderRadius: '0.25rem', 
+                padding: '0.5rem 1rem',
+                fontSize: '0.9em', 
+                fontWeight: '500',
+                cursor: isVerified || isVerifying ? 'not-allowed' : 'pointer',
+                opacity: isVerified || isVerifying ? 0.7 : 1,
+                transition: 'all 0.2s ease',
+              }}
+              onMouseEnter={(e) => {
+                if (!isVerifying && !isVerified) {
+                  e.currentTarget.style.opacity = '0.9';
+                  e.currentTarget.style.transform = 'translateY(-2px)';
+                }
+              }}
+              onMouseLeave={(e) => {
+                if (!isVerifying && !isVerified) {
+                  e.currentTarget.style.opacity = '1';
+                  e.currentTarget.style.transform = 'translateY(0)';
+                }
+              }}
+              disabled={isVerifying || isVerified}
+            >
+              {isVerified ? '✅ Verified' : isVerifying ? '🔄 Verifying...' : 'Verify'}
+            </button>
             <pre style={{ background: '#f7fafc', padding: '0.75rem', borderRadius: '0.25rem', fontSize: '0.75rem', overflow: 'auto', maxHeight: '300px', marginTop: '0.5rem' }}>
               {JSON.stringify(selectedProof.proof?.onchainProof || selectedProof.proof, null, 2)}
             </pre>
