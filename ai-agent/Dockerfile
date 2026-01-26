@@ -6,7 +6,7 @@ COPY . /workspace
 WORKDIR /workspace/ai-agent
 
 # Install dependencies and build
-RUN npm install --prefer-offline --no-audit && npm run build
+RUN npm install --prefer-offline --no-audit --legacy-peer-deps && npm run build
 
 # Stage 2: Serve with nginx
 FROM nginx:1.27-bookworm-perl
