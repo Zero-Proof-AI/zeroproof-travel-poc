@@ -318,6 +318,394 @@ async fn book_flight(
     })))
 }
 
+#[derive(Debug, Deserialize)]
+struct McpRequest {
+    jsonrpc: String,
+    id: Option<serde_json::Value>,
+    method: String,
+    params: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize)]
+struct McpResponse {
+    jsonrpc: String,
+    id: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<McpError>,
+}
+
+#[derive(Debug, Serialize)]
+struct McpError {
+    code: i32,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<serde_json::Value>,
+}
+
+/// MCP Initialize Response
+#[derive(Debug, Serialize)]
+struct InitializeResult {
+    protocol_version: String,
+    capabilities: serde_json::Value,
+    server_info: serde_json::Value,
+}
+
+/// MCP Tools List Response
+#[derive(Debug, Serialize)]
+struct ToolsListResult {
+    tools: Vec<McpTool>,
+}
+
+#[derive(Debug, Serialize)]
+struct McpTool {
+    name: String,
+    description: String,
+    #[serde(rename = "inputSchema")]
+    input_schema: serde_json::Value,
+}
+
+/// MCP Tool Call Response
+#[derive(Debug, Serialize)]
+struct ToolCallResult {
+    content: Vec<serde_json::Value>,
+    #[serde(rename = "isError")]
+    is_error: bool,
+}
+
+/// Handle MCP protocol requests
+async fn handle_mcp(
+    Json(req): Json<McpRequest>,
+) -> Result<Json<McpResponse>, (StatusCode, Json<McpResponse>)> {
+    tracing::info!("[MCP] Received request: method={}, id={:?}", req.method, req.id);
+
+    match req.method.as_str() {
+        "initialize" => {
+            let result = InitializeResult {
+                protocol_version: "2024-11-05".to_string(),
+                capabilities: json!({
+                    "tools": {}
+                }),
+                server_info: json!({
+                    "name": "agent-b-mcp-server",
+                    "version": "1.0.0"
+                }),
+            };
+
+            Ok(Json(McpResponse {
+                jsonrpc: "2.0".to_string(),
+                id: req.id,
+                result: Some(serde_json::to_value(result).unwrap()),
+                error: None,
+            }))
+        }
+
+        "tools/list" => {
+            let tools = vec![
+                McpTool {
+                    name: "get-ticket-price".to_string(),
+                    description: "Get flight ticket pricing based on route and passenger tier".to_string(),
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "from": {
+                                "type": "string",
+                                "description": "Departure city code (e.g., NYC)"
+                            },
+                            "to": {
+                                "type": "string",
+                                "description": "Destination city code (e.g., LON)"
+                            },
+                            "vip": {
+                                "type": "boolean",
+                                "description": "Whether passenger is VIP (optional, default false)"
+                            }
+                        },
+                        "required": ["from", "to"]
+                    }),
+                },
+                McpTool {
+                    name: "book-flight".to_string(),
+                    description: "Book a flight and generate confirmation".to_string(),
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "from": {
+                                "type": "string",
+                                "description": "Departure city code"
+                            },
+                            "to": {
+                                "type": "string",
+                                "description": "Destination city code"
+                            },
+                            "passenger_name": {
+                                "type": "string",
+                                "description": "Full name of passenger"
+                            },
+                            "passenger_email": {
+                                "type": "string",
+                                "description": "Email address of passenger"
+                            }
+                        },
+                        "required": ["from", "to", "passenger_name", "passenger_email"]
+                    }),
+                },
+            ];
+
+            let result = ToolsListResult { tools };
+
+            Ok(Json(McpResponse {
+                jsonrpc: "2.0".to_string(),
+                id: req.id,
+                result: Some(serde_json::to_value(result).unwrap()),
+                error: None,
+            }))
+        }
+
+        "tools/call" => {
+            let params = req.params.ok_or_else(|| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(McpResponse {
+                        jsonrpc: "2.0".to_string(),
+                        id: req.id.clone(),
+                        result: None,
+                        error: Some(McpError {
+                            code: -32602,
+                            message: "Invalid params".to_string(),
+                            data: None,
+                        }),
+                    }),
+                )
+            })?;
+
+            let tool_name = params.get("name")
+                .and_then(|n| n.as_str())
+                .ok_or_else(|| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(McpResponse {
+                            jsonrpc: "2.0".to_string(),
+                            id: req.id.clone(),
+                            result: None,
+                            error: Some(McpError {
+                                code: -32602,
+                                message: "Tool name required".to_string(),
+                                data: None,
+                            }),
+                        }),
+                    )
+                })?;
+
+            let tool_args = params.get("arguments")
+                .and_then(|a| a.as_object())
+                .ok_or_else(|| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(McpResponse {
+                            jsonrpc: "2.0".to_string(),
+                            id: req.id.clone(),
+                            result: None,
+                            error: Some(McpError {
+                                code: -32602,
+                                message: "Tool arguments required".to_string(),
+                                data: None,
+                            }),
+                        }),
+                    )
+                })?;
+
+            match tool_name {
+                "get-ticket-price" => {
+                    let from = tool_args.get("from")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let to = tool_args.get("to")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let vip = tool_args.get("vip")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+
+                    // Validate required fields (same as existing get_ticket_price handler)
+                    if from.is_empty() && to.is_empty() {
+                        return Err((
+                            StatusCode::BAD_REQUEST,
+                            Json(McpResponse {
+                                jsonrpc: "2.0".to_string(),
+                                id: req.id.clone(),
+                                result: None,
+                                error: Some(McpError {
+                                    code: -32602,
+                                    message: "Missing required fields: 'from' (departure city) and 'to' (destination city) are both required".to_string(),
+                                    data: None,
+                                }),
+                            }),
+                        ));
+                    }
+
+                    if from.is_empty() {
+                        return Err((
+                            StatusCode::BAD_REQUEST,
+                            Json(McpResponse {
+                                jsonrpc: "2.0".to_string(),
+                                id: req.id.clone(),
+                                result: None,
+                                error: Some(McpError {
+                                    code: -32602,
+                                    message: "Missing required field: 'from' (departure city code, e.g., NYC, LON, LAX)".to_string(),
+                                    data: None,
+                                }),
+                            }),
+                        ));
+                    }
+
+                    if to.is_empty() {
+                        return Err((
+                            StatusCode::BAD_REQUEST,
+                            Json(McpResponse {
+                                jsonrpc: "2.0".to_string(),
+                                id: req.id.clone(),
+                                result: None,
+                                error: Some(McpError {
+                                    code: -32602,
+                                    message: "Missing required field: 'to' (destination city code, e.g., NYC, LON, LAX)".to_string(),
+                                    data: None,
+                                }),
+                            }),
+                        ));
+                    }
+
+                    // Use the existing pricing::handle from pricing-core (same as existing handler)
+                    let core_req = pricing::Request {
+                        from: from.to_string(),
+                        to: to.to_string(),
+                        vip,
+                    };
+
+                    let core_resp = pricing::handle(core_req);
+
+                    let content = vec![json!({
+                        "type": "text",
+                        "text": serde_json::to_string(&PriceResponse {
+                            price: core_resp.price,
+                            from: from.to_string(),
+                            to: to.to_string(),
+                            vip,
+                            currency: "USD".to_string(),
+                            proof: None,
+                        }).unwrap()
+                    })];
+
+                    let result = ToolCallResult {
+                        content,
+                        is_error: false,
+                    };
+
+                    Ok(Json(McpResponse {
+                        jsonrpc: "2.0".to_string(),
+                        id: req.id,
+                        result: Some(serde_json::to_value(result).unwrap()),
+                        error: None,
+                    }))
+                }
+
+                "book-flight" => {
+                    let from = tool_args.get("from")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let to = tool_args.get("to")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let passenger_name = tool_args.get("passenger_name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let passenger_email = tool_args.get("passenger_email")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+
+                    // For MCP calls, generate a session_id (no validation/payment checks)
+                    let session_id = format!("mcp-session-{}", req.id.as_ref()
+                        .and_then(|id| id.as_str())
+                        .unwrap_or("unknown"));
+
+                    // Get zkfetch URL from environment
+                    let zkfetch_url = std::env::var("ZKFETCH_WRAPPER_URL")
+                        .unwrap_or_else(|_| "http://localhost:8003".to_string());
+
+                    // Call handle_async directly (no validation/payment verification for MCP)
+                    let core_req = booking::Request {
+                        from: from.to_string(),
+                        to: to.to_string(),
+                        passenger_name: passenger_name.to_string(),
+                        passenger_email: passenger_email.to_string(),
+                    };
+
+                    let (response, proof) = booking::handle_async(core_req, zkfetch_url, &session_id).await;
+
+                    let content = vec![json!({
+                        "type": "text",
+                        "text": serde_json::to_string(&BookResponse {
+                            booking_id: response.booking_id,
+                            status: response.status,
+                            confirmation_code: response.confirmation_code,
+                            from: from.to_string(),
+                            to: to.to_string(),
+                            passenger_name: passenger_name.to_string(),
+                            proof,
+                        }).unwrap()
+                    })];
+
+                    let result = ToolCallResult {
+                        content,
+                        is_error: false,
+                    };
+
+                    Ok(Json(McpResponse {
+                        jsonrpc: "2.0".to_string(),
+                        id: req.id,
+                        result: Some(serde_json::to_value(result).unwrap()),
+                        error: None,
+                    }))
+                }
+
+                _ => {
+                    Err((
+                        StatusCode::NOT_FOUND,
+                        Json(McpResponse {
+                            jsonrpc: "2.0".to_string(),
+                            id: req.id,
+                            result: None,
+                            error: Some(McpError {
+                                code: -32601,
+                                message: format!("Tool '{}' not found", tool_name),
+                                data: None,
+                            }),
+                        }),
+                    ))
+                }
+            }
+        }
+
+        _ => {
+            Err((
+                StatusCode::METHOD_NOT_ALLOWED,
+                Json(McpResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id: req.id,
+                    result: None,
+                    error: Some(McpError {
+                        code: -32601,
+                        message: format!("Method '{}' not found", req.method),
+                        data: None,
+                    }),
+                }),
+            ))
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Load environment variables from .env file
@@ -338,6 +726,7 @@ async fn main() -> Result<()> {
         .route("/tools", get(list_tools))
         .route("/tools/get-ticket-price", post(get_ticket_price))
         .route("/tools/book-flight", post(book_flight))
+        .route("/mcp", post(handle_mcp))
         .layer(CorsLayer::permissive());
 
     // Get port from environment variable or use default
@@ -364,7 +753,8 @@ async fn main() -> Result<()> {
     println!("✓ Agent B MCP Server running on http://0.0.0.0:{}", port);
     println!("  GET  /tools                     — List all tools");
     println!("  POST /tools/get-ticket-price    — Get flight pricing");
-    println!("  POST /tools/book-flight         — Book a flight\n");
+    println!("  POST /tools/book-flight         — Book a flight");
+    println!("  POST /mcp                       — MCP protocol endpoint\n");
 
     
     
