@@ -347,8 +347,10 @@ struct McpError {
 /// MCP Initialize Response
 #[derive(Debug, Serialize)]
 struct InitializeResult {
+    #[serde(rename = "protocolVersion")]
     protocol_version: String,
     capabilities: serde_json::Value,
+    #[serde(rename = "serverInfo")]
     server_info: serde_json::Value,
 }
 
