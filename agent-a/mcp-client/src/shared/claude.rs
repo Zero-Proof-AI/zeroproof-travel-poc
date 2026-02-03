@@ -239,7 +239,9 @@ pub async fn call_tool_with_proof(
         let response = proxy_fetch.post(&target_url, Some(arguments_with_name)).await?;
         
         // Extract proof from response
-        let proof = response.get("proof").cloned();
+        // Use onchainProof (transformed by transformForOnchain()) for on-chain verification
+        // The raw proof is for off-chain verification only
+        let proof = response.get("onchainProof").cloned().or_else(|| response.get("proof").cloned());
         let verified = response.get("verified").and_then(|v| v.as_bool()).unwrap_or(false);
         let onchain_compatible = response.get("metadata")
             .and_then(|m| m.get("onchain_compatible"))

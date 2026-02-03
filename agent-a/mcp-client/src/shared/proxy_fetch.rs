@@ -70,11 +70,6 @@ pub struct ZkfetchToolOptions {
     /// Fields to exclude from the proof (specified as JSON paths)
     /// Example: `{"jsonPath": "$.data.card_number"}` to hide the card_number field
     pub redactions: Option<Vec<Value>>,
-
-    /// Sensitive field paths in the response that should be redacted
-    /// Maps field names to their jsonPath in the response structure
-    /// Example: `{"passenger_name": "$.data.passenger_name"}`
-    pub response_redaction_paths: Option<std::collections::HashMap<String, String>>,
 }
 
 impl Default for ZkfetchToolOptions {
@@ -83,7 +78,6 @@ impl Default for ZkfetchToolOptions {
             public_options: None,
             private_options: None,
             redactions: None,
-            response_redaction_paths: None,
         }
     }
 }
@@ -519,12 +513,33 @@ impl ProxyFetch {
                 
                 // Extract from request body
                 if let Some(body_obj) = final_body.as_object_mut() {
+                    // Try nested MCP structure first (params.arguments)
+                    if let Some(params_obj) = body_obj.get_mut("params") {
+                        if let Some(arguments_obj) = params_obj.get_mut("arguments") {
+                            if let Some(args) = arguments_obj.as_object_mut() {
+                                for param in hidden_params.iter() {
+                                    if let Value::String(param_name) = param {
+                                        if let Some(value) = args.remove(param_name) {
+                                            param_values_map.insert(param_name.clone(), value);
+                                            let placeholder = format!("{{{}}}", param_name);
+                                            args.insert(param_name.clone(), Value::String(placeholder));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Also try top-level body for direct tool parameters
+                    // (but don't overwrite if already extracted from nested structure)
                     for param in hidden_params.iter() {
                         if let Value::String(param_name) = param {
-                            if let Some(value) = body_obj.remove(param_name) {
-                                param_values_map.insert(param_name.clone(), value);
-                                let placeholder = format!("{{{{{}}}}}", param_name);
-                                body_obj.insert(param_name.clone(), Value::String(placeholder));
+                            if !param_values_map.contains_key(param_name) {
+                                if let Some(value) = body_obj.remove(param_name) {
+                                    param_values_map.insert(param_name.clone(), value);
+                                    let placeholder = format!("{{{}}}", param_name);
+                                    body_obj.insert(param_name.clone(), Value::String(placeholder));
+                                }
                             }
                         }
                     }
@@ -592,8 +607,13 @@ impl ProxyFetch {
                     .unwrap_or(json!(30000))
             },
             "privateOptions": private_options,
-            "redactions": zk_options.redactions.unwrap_or_default()
+            "redactions": zk_options.redactions.as_ref().unwrap_or(&vec![]).clone()
         });
+
+        if self.config.debug {
+            eprintln!("[PROXY_FETCH] DEBUG - privateOptions: {}", serde_json::to_string_pretty(&private_options).unwrap_or_default());
+            eprintln!("[PROXY_FETCH] DEBUG - redactions: {}", serde_json::to_string_pretty(zk_options.redactions.as_ref().unwrap_or(&vec![])).unwrap_or_default());
+        }
 
         if self.config.debug {
             tracing::info!("📦 Final zkfetch payload structure:");
@@ -833,13 +853,25 @@ impl ProxyFetch {
     ///
     /// Resolution order:
     /// 1. If tool_name is Some, looks up in tool_options_map
-    /// 2. Falls back to default_zk_options if provided
-    /// 3. Returns empty ZkfetchToolOptions if neither found
+    /// 2. If tool_options_map has exactly one entry, use it (implicit single-tool mode)
+    /// 3. Falls back to default_zk_options if provided
+    /// 4. Returns empty ZkfetchToolOptions if neither found
     fn resolve_tool_options(&self, tool_name: &Option<String>) -> ZkfetchToolOptions {
         if let Some(name) = tool_name {
             if let Some(options_map) = &self.config.tool_options_map {
                 if let Some(options) = options_map.get(name) {
                     return options.clone();
+                }
+            }
+        }
+
+        // If tool_name not provided but only one tool exists, use it
+        if tool_name.is_none() {
+            if let Some(options_map) = &self.config.tool_options_map {
+                if options_map.len() == 1 {
+                    if let Some(options) = options_map.values().next() {
+                        return options.clone();
+                    }
                 }
             }
         }
@@ -900,7 +932,6 @@ mod tests {
             public_options: Some(json!({"timeout": 20000})),
             private_options: None,
             redactions: Some(vec![json!({"path": "body.sensitive"})]),
-            response_redaction_paths: None,
         };
         tool_options.insert("get-ticket-price".to_string(), options.clone());
 
@@ -920,7 +951,6 @@ mod tests {
             public_options: Some(json!({"timeout": 15000})),
             private_options: None,
             redactions: None,
-            response_redaction_paths: None,
         };
 
         let config = ProxyConfig {

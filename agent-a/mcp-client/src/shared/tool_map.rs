@@ -48,16 +48,12 @@ pub fn build_tool_options_map() -> ToolOptionsMap {
                 json!({"jsonPath": "$.data.confirmation_code"}),
                 json!({"jsonPath": "$.data.status"}),
             ]),
-            response_redaction_paths: Some(book_flight_paths),
         },
     );
 
     // enroll-card: Payment card enrollment - redact card details
     // Reveals ONLY: tokenId
     // Hides: all card information from proof
-    let mut enroll_card_paths = HashMap::new();
-    enroll_card_paths.insert("tokenId".to_string(), "$.data.tokenId".to_string());
-    
     map.insert(
         "enroll-card".to_string(),
         ZkfetchToolOptions {
@@ -70,16 +66,12 @@ pub fn build_tool_options_map() -> ToolOptionsMap {
             redactions: Some(vec![
                 json!({"jsonPath": "$.data.tokenId"}),
             ]),
-            response_redaction_paths: Some(enroll_card_paths),
         },
     );
 
     // initiate-purchase-instruction: Payment initiation - redact transaction details
     // Reveals ONLY: instructionId
     // Hides: amount, tokenId, and other sensitive transaction details from proof
-    let mut purchase_paths = HashMap::new();
-    purchase_paths.insert("instructionId".to_string(), "$.data.instructionId".to_string());
-    
     map.insert(
         "initiate-purchase-instruction".to_string(),
         ZkfetchToolOptions {
@@ -92,7 +84,6 @@ pub fn build_tool_options_map() -> ToolOptionsMap {
             redactions: Some(vec![
                 json!({"jsonPath": "$.data.instructionId"}),
             ]),
-            response_redaction_paths: Some(purchase_paths),
         },
     );
 
@@ -101,11 +92,6 @@ pub fn build_tool_options_map() -> ToolOptionsMap {
     // Hides: tokenId, signedPayload, and other sensitive identifiers from proof
     // NOTE: The on-chain proof will have placeholder values for hidden parameters,
     // and the contract should verify the identifier against keccak256(claimInfo with placeholders)
-    let mut credentials_paths = HashMap::new();
-    credentials_paths.insert("status".to_string(), "$.data.status".to_string());
-    credentials_paths.insert("instructionId".to_string(), "$.data.instructionId".to_string());
-    credentials_paths.insert("authorization".to_string(), "$.data.authorization".to_string());
-    
     map.insert(
         "retrieve-payment-credentials".to_string(),
         ZkfetchToolOptions {
@@ -120,7 +106,6 @@ pub fn build_tool_options_map() -> ToolOptionsMap {
                 json!({"jsonPath": "$.data.instructionId"}),
                 json!({"jsonPath": "$.data.authorization"}),
             ]),
-            response_redaction_paths: Some(credentials_paths),
         },
     );
 

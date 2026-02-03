@@ -77,17 +77,19 @@ pub async fn handle_async(req: Request, zkfetch_url: String, session_id: &str) -
         public_options: None,
         private_options: Some(json!({
             "hiddenParameters": ["passenger_name", "passenger_email"],
+            // Use regex with named capture groups to extract and populate extractedParameterValues
+            // This ensures the extracted title appears in proof.extractedParameterValues
             "responseMatches": [
                 {
-                    "type": "contains",
-                    "value": "\"title\": \"Overview\""
+                    "type": "regex",
+                    "value": "\"title\":\\s*\"(?<title>[^\"]+)\""
                 }
             ]
         })),
+        // Redact the entire slideshow object to hide everything except the extracted title
         redactions: Some(vec![
-            json!({"jsonPath": "$.slideshow.slides[1].title"}),
+            json!({"jsonPath": "$.slideshow"}),
         ]),
-        response_redaction_paths: Some(book_flight_paths),
     };
 
     tool_options.insert("book-flight".to_string(), booking_zk_options);
@@ -112,10 +114,20 @@ pub async fn handle_async(req: Request, zkfetch_url: String, session_id: &str) -
 
     match proxy_fetch::ProxyFetch::new(proxy_config) {
         Ok(proxy_fetch) => {
-            // Use GET method since we're fetching from httpbin.org/json
+            // Use GET method since we're fetching from httpbin.org/json (only supports GET)
+            // Tool name is extracted from the MCP context passed earlier via tool_options_map
             match proxy_fetch.get("https://httpbin.org/json").await {
                 Ok(json_response) => {
-                    // eprintln!("[BOOKING] ProxyFetch response: {}", serde_json::to_string_pretty(&json_response).unwrap_or_default());
+                    eprintln!("[BOOKING] ProxyFetch response keys: {:?}", json_response.as_object().map(|o| o.keys().collect::<Vec<_>>()));
+                    
+                    // Debug: Print the full response structure
+                    if let Some(proof) = json_response.get("proof") {
+                        eprintln!("[BOOKING] Proof keys: {:?}", proof.as_object().map(|o| o.keys().collect::<Vec<_>>()));
+                        
+                        if let Some(extracted) = proof.get("extractedParameterValues") {
+                            eprintln!("[BOOKING] extractedParameterValues: {}", serde_json::to_string_pretty(extracted).unwrap_or_default());
+                        }
+                    }
                     
                     // Extract booking confirmation from response
                     if let Some(proof) = json_response.get("proof") {
