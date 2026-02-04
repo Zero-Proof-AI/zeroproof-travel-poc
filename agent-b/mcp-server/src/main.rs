@@ -379,8 +379,11 @@ struct ToolCallResult {
 /// Handle MCP protocol requests
 async fn handle_mcp(
     Json(req): Json<McpRequest>,
-) -> Result<Json<McpResponse>, (StatusCode, Json<McpResponse>)> {
+) -> Result<(StatusCode, Json<McpResponse>), (StatusCode, Json<McpResponse>)> {
     tracing::info!("[MCP] Received request: method={}, id={:?}", req.method, req.id);
+
+    // Per MCP spec, notifications (no id field) should return HTTP 202 Accepted with no body
+    let is_notification = req.id.is_none();
 
     match req.method.as_str() {
         "initialize" => {
@@ -395,12 +398,12 @@ async fn handle_mcp(
                 }),
             };
 
-            Ok(Json(McpResponse {
+            Ok((StatusCode::OK, Json(McpResponse {
                 jsonrpc: "2.0".to_string(),
                 id: req.id,
                 result: Some(serde_json::to_value(result).unwrap()),
                 error: None,
-            }))
+            })))
         }
 
         "tools/list" => {
@@ -457,12 +460,12 @@ async fn handle_mcp(
 
             let result = ToolsListResult { tools };
 
-            Ok(Json(McpResponse {
+            Ok((StatusCode::OK, Json(McpResponse {
                 jsonrpc: "2.0".to_string(),
                 id: req.id,
                 result: Some(serde_json::to_value(result).unwrap()),
                 error: None,
-            }))
+            })))
         }
 
         "tools/call" => {
@@ -605,12 +608,12 @@ async fn handle_mcp(
                         is_error: false,
                     };
 
-                    Ok(Json(McpResponse {
+                    Ok((StatusCode::OK, Json(McpResponse {
                         jsonrpc: "2.0".to_string(),
                         id: req.id,
                         result: Some(serde_json::to_value(result).unwrap()),
                         error: None,
-                    }))
+                    })))
                 }
 
                 "book-flight" => {
@@ -664,12 +667,12 @@ async fn handle_mcp(
                         is_error: false,
                     };
 
-                    Ok(Json(McpResponse {
+                    Ok((StatusCode::OK, Json(McpResponse {
                         jsonrpc: "2.0".to_string(),
                         id: req.id,
                         result: Some(serde_json::to_value(result).unwrap()),
                         error: None,
-                    }))
+                    })))
                 }
 
                 _ => {
@@ -691,6 +694,18 @@ async fn handle_mcp(
         }
 
         _ => {
+            // Per MCP spec, notifications (no id) should return HTTP 202 Accepted with empty body
+            if is_notification {
+                tracing::debug!("[MCP] Notification '{}' received and accepted", req.method);
+                return Ok((StatusCode::ACCEPTED, Json(McpResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id: None,
+                    result: None,
+                    error: None,
+                })));
+            }
+            
+            // Regular requests with unknown methods return 405 error
             Err((
                 StatusCode::METHOD_NOT_ALLOWED,
                 Json(McpResponse {
