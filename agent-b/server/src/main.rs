@@ -201,6 +201,12 @@ async fn register_elf_with_attester(
         .await
         .map_err(|e| format!("Failed to register ELF: {}", e))?;
 
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("ELF registration failed (HTTP {status}): {body}"));
+    }
+
     let body: serde_json::Value = response
         .json()
         .await

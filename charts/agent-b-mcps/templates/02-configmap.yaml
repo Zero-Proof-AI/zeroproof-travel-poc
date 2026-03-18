@@ -8,3 +8,6 @@ metadata:
 data:
   NODE_ENV: development
   PORT: "3030"
+  ZKFETCH_WRAPPER_URL: https://dev.zktls.zeroproofai.com
+  ATTESTER_URL: https://dev.attester.zeroproofai.com
+  RECLAIM_ADDRESS: "0xAe94FB09711e1c6B057853a515483792d8e474d0"

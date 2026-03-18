@@ -1,11 +1,11 @@
-# Default values for agent-b-mcps.
+# Default values for agent-a-mcps.
 # This is a YAML-formatted file.
 # Declare variables to be passed into your templates.
 
 replicaCount: 1
 
 image:
-  repository: "940333627479.dkr.ecr.us-east-1.amazonaws.com/agent-b-mcps"  # Will be set to the ECR image URI
+  repository: "940333627479.dkr.ecr.us-east-1.amazonaws.com/agent-a-mcps"  # Will be set to the ECR image URI
   pullPolicy: Always
   tag: "latest"
 
@@ -55,13 +55,7 @@ ingress:
       hosts:
         - dev.agentb.zeroproofai.com
 
-resources:
-  limits:
-    cpu: 300m
-    memory: 2048Mi
-  requests:
-    cpu: 200m
-    memory: 256Mi
+resources: {}
 
 autoscaling:
   enabled: false

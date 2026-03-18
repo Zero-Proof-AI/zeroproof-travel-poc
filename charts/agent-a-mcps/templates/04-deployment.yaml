@@ -39,38 +39,13 @@ spec:
             - name: NODE_ENV
               valueFrom:
                 configMapKeyRef:
-                  name: agent-b-mcps-config
+                  name: agent-a-mcps-config
                   key: NODE_ENV
             - name: PORT
               valueFrom:
                 configMapKeyRef:
-                  name: agent-b-mcps-config
+                  name: agent-a-mcps-config
                   key: PORT
-            - name: ATTESTER_URL
-              valueFrom:
-                configMapKeyRef:
-                  name: agent-b-mcps-config
-                  key: ATTESTER_URL
-            - name: RECLAIM_ADDRESS
-              valueFrom:
-                configMapKeyRef:
-                  name: agent-b-mcps-config
-                  key: RECLAIM_ADDRESS
-            - name: ZKFETCH_WRAPPER_URL
-              valueFrom:
-                configMapKeyRef:
-                  name: agent-b-mcps-config
-                  key: ZKFETCH_WRAPPER_URL
-            - name: SEPOLIA_RPC_URL
-              valueFrom:
-                secretKeyRef:
-                  name: agent-b-mcps
-                  key: SEPOLIA_RPC_URL
-            - name: PRIVATE_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: agent-b-mcps
-                  key: PRIVATE_KEY
           livenessProbe:
             httpGet:
               path: /health

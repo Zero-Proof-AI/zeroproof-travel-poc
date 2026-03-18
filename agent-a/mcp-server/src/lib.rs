@@ -269,6 +269,7 @@ pub async fn request_attestation(
     let request = AttestRequest {
         program_id: program_id.to_string(),
         input_bytes,
+        stdin_items: vec![],
         claimed_output,
         verify_locally,
     };
