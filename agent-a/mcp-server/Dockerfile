@@ -19,9 +19,6 @@ COPY agent-a/mcp-server/ ./mcp-server/
 COPY agent-a/mcp-client/ ./mcp-client/
 COPY agent-a/src/ ./src/
 
-# Copy shared protocol
-COPY zk-protocol/ ../zk-protocol/
-
 # Build the MCP server in release mode
 RUN cargo build --release -p agent-a-mcp-server
 
