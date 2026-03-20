@@ -15,8 +15,6 @@ COPY agent-a/mcp-server/ ./mcp-server/
 COPY agent-a/mcp-client/ ./mcp-client/
 COPY agent-a/src/ ./src/
 
-COPY zk-protocol/ ../zk-protocol/
-
 RUN cargo build --release --bin mcp-client-http -p mcp-client
 
 # Debug: list binaries

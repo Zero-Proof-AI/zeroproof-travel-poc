@@ -34,7 +34,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 # Protocol types (shared)
-zk-protocol = "0.1"
+zk-protocol = "0.2"
 
 [lib]
 name = "agent_a_mcp"

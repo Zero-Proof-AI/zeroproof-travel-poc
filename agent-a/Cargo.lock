@@ -4853,9 +4853,9 @@ dependencies = [
 
 [[package]]
 name = "zk-protocol"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0771671ad84e4b68d4023664edade38eb74e2fc2544846736695b89e4f0efd2"
+checksum = "86970a0821cd06ae0fb04d64d2b02cf27103874c12bda914b7900809fbfc5b39"
 dependencies = [
  "bincode",
  "serde",

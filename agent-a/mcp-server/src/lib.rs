@@ -272,6 +272,9 @@ pub async fn request_attestation(
         stdin_items: vec![],
         claimed_output,
         verify_locally,
+        external_id: None,
+        intent_commitment: None,
+        verified_fields: None,
     };
 
     let response = client
