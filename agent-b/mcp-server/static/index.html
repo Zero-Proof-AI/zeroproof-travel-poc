@@ -56,6 +56,14 @@
       color: #000;
     }
     .wallet-badge.enrolled:hover { background: rgba(255,255,255,0.25); }
+    .wallet-badge .copy-btn {
+      display: inline-block;
+      margin-left: 0.4rem;
+      cursor: pointer;
+      opacity: 0.7;
+      font-size: 0.8rem;
+    }
+    .wallet-badge .copy-btn:hover { opacity: 1; }
     .balance-popover {
       display: none;
       position: absolute;
@@ -640,9 +648,18 @@
       const badge = document.getElementById('walletBadge');
       badge.className = 'wallet-badge enrolled';
       badge.onclick = toggleBalancePopover;
-      badge.textContent = addr.slice(0, 6) + '…' + addr.slice(-4);
+      badge.innerHTML = addr.slice(0, 6) + '…' + addr.slice(-4)
+        + '<span class="copy-btn" title="Copy wallet address" onclick="event.stopPropagation(); copyWallet()">📋</span>';
       document.getElementById('enrollBanner').classList.remove('show');
       fetchBalance();
+    }
+
+    function copyWallet() {
+      if (!merchantWallet) return;
+      navigator.clipboard.writeText(merchantWallet).then(() => {
+        const btn = document.querySelector('.wallet-badge .copy-btn');
+        if (btn) { btn.textContent = '✅'; setTimeout(() => btn.textContent = '📋', 1500); }
+      });
     }
 
     function toggleBalancePopover(e) {

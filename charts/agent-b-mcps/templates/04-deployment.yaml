@@ -71,6 +71,16 @@ spec:
                 secretKeyRef:
                   name: agent-b-mcps
                   key: PRIVATE_KEY
+            - name: ZPI_ZKPAY_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: agent-b-mcps-config
+                  key: ZPI_ZKPAY_URL
+            - name: MERCHANT_WALLET_ADDRESS
+              valueFrom:
+                configMapKeyRef:
+                  name: agent-b-mcps-config
+                  key: MERCHANT_WALLET_ADDRESS
           livenessProbe:
             httpGet:
               path: /health

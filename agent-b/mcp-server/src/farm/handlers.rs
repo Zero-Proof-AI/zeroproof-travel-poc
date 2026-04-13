@@ -689,6 +689,9 @@ pub async fn handle_verify_otp(
             // Also persist chain_id
             let _ = db.set("chain_id", &result.chain_id.to_string());
 
+            // Update env var so X402Config::from_env() picks up the new wallet
+            std::env::set_var("MERCHANT_WALLET_ADDRESS", &result.wallet_address);
+
             tracing::info!(
                 wallet = %result.wallet_address,
                 email = %result.email,

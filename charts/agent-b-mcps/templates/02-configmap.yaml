@@ -11,3 +11,5 @@ data:
   ZKFETCH_WRAPPER_URL: https://dev.zktls.zeroproofai.com
   ATTESTER_URL: https://dev.attester.zeroproofai.com
   RECLAIM_ADDRESS: "0xAe94FB09711e1c6B057853a515483792d8e474d0"
+  ZPI_ZKPAY_URL: http://zpi-zkpay.mordor.svc.cluster.local:8080
+  MERCHANT_WALLET_ADDRESS: "0x87597B1Cc790EC8678E7CB2C50aa9b8B023db195"
