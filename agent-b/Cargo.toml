@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "pricing-core",
+    "farm-core",
     "server",
     "program",
     "mcp-server",

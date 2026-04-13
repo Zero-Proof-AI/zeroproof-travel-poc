@@ -7,20 +7,25 @@
 
 use anyhow::Result;
 use axum::{
-    extract::Json,
+    extract::{Json, State},
     http::StatusCode,
-    routing::{get, post},
+    routing::{get, post, put},
     Router,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tower_http::cors::CorsLayer;
+use tower_http::services::ServeDir;
 
 mod validate;
+mod farm;
 
 use pricing_core::pricing;
 use pricing_core::booking;
 use validate::verify_payment_proof;
+use farm::state::{new_shared_state, AppState, SharedFarmState};
+use farm::db::open_merchant_db;
+use farm::handlers;
 
 /// Pricing Tool Request
 #[derive(Debug, Deserialize)]
@@ -115,58 +120,68 @@ async fn health() -> Json<serde_json::Value> {
 /// List all available tools
 async fn list_tools() -> Json<ToolsResponse> {
     tracing::info!("[LIST TOOLS] Received request to list available tools");
-    Json(ToolsResponse {
-        tools: vec![
-            ToolDefinition {
-                name: "get-ticket-price".to_string(),
-                description: "Get flight ticket pricing based on route and passenger tier".to_string(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "from": {
-                            "type": "string",
-                            "description": "Departure city code (e.g., NYC)"
-                        },
-                        "to": {
-                            "type": "string",
-                            "description": "Destination city code (e.g., LON)"
-                        },
-                        "vip": {
-                            "type": "boolean",
-                            "description": "Whether passenger is VIP (optional, default false)"
-                        }
+
+    let mut tools = vec![
+        ToolDefinition {
+            name: "get-ticket-price".to_string(),
+            description: "Get flight ticket pricing based on route and passenger tier".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "from": {
+                        "type": "string",
+                        "description": "Departure city code (e.g., NYC)"
                     },
-                    "required": ["from", "to"]
-                }),
-            },
-            ToolDefinition {
-                name: "book-flight".to_string(),
-                description: "Book a flight and generate confirmation".to_string(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "from": {
-                            "type": "string",
-                            "description": "Departure city code"
-                        },
-                        "to": {
-                            "type": "string",
-                            "description": "Destination city code"
-                        },
-                        "passenger_name": {
-                            "type": "string",
-                            "description": "Full name of passenger"
-                        },
-                        "passenger_email": {
-                            "type": "string",
-                            "description": "Email address of passenger"
-                        }
+                    "to": {
+                        "type": "string",
+                        "description": "Destination city code (e.g., LON)"
                     },
-                    "required": ["from", "to", "passenger_name", "passenger_email"]
-                }),
-            },
-        ],
-    })
+                    "vip": {
+                        "type": "boolean",
+                        "description": "Whether passenger is VIP (optional, default false)"
+                    }
+                },
+                "required": ["from", "to"]
+            }),
+        },
+        ToolDefinition {
+            name: "book-flight".to_string(),
+            description: "Book a flight and generate confirmation".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "from": {
+                        "type": "string",
+                        "description": "Departure city code"
+                    },
+                    "to": {
+                        "type": "string",
+                        "description": "Destination city code"
+                    },
+                    "passenger_name": {
+                        "type": "string",
+                        "description": "Full name of passenger"
+                    },
+                    "passenger_email": {
+                        "type": "string",
+                        "description": "Email address of passenger"
+                    }
+                },
+                "required": ["from", "to", "passenger_name", "passenger_email"]
+            }),
+        },
+    ];
+
+    // Add farm tools
+    for def in handlers::farm_tool_definitions() {
+        tools.push(ToolDefinition {
+            name: def["name"].as_str().unwrap_or("").to_string(),
+            description: def["description"].as_str().unwrap_or("").to_string(),
+            input_schema: def["inputSchema"].clone(),
+        });
+    }
+
+    Json(ToolsResponse { tools })
 }
 
 /// Get ticket pricing
@@ -376,8 +391,64 @@ struct ToolCallResult {
     is_error: bool,
 }
 
+/// Dispatch farm tool calls within the MCP handler.
+/// Returns Some(content) if the tool was handled, None if unknown.
+async fn dispatch_farm_tool(
+    tool_name: &str,
+    tool_args: &serde_json::Map<String, serde_json::Value>,
+    farm_state: SharedFarmState,
+    merchant_db: farm::db::SharedMerchantDb,
+) -> Option<Vec<serde_json::Value>> {
+    let args_value = serde_json::Value::Object(tool_args.clone());
+
+    let resp = match tool_name {
+        "farm-list-products" => {
+            let req: handlers::ListProductsRequest = serde_json::from_value(args_value).ok()?;
+            let axum::Json(r) = handlers::handle_list_products(Json(req)).await;
+            r
+        }
+        "farm-get-product" => {
+            let req: handlers::GetProductRequest = serde_json::from_value(args_value).ok()?;
+            match handlers::handle_get_product(Json(req)).await {
+                Ok(axum::Json(r)) => r,
+                Err((_, axum::Json(r))) => r,
+            }
+        }
+        "farm-add-to-cart" => {
+            let req: handlers::AddToCartRequest = serde_json::from_value(args_value).ok()?;
+            match handlers::handle_add_to_cart(State(farm_state), Json(req)).await {
+                Ok(axum::Json(r)) => r,
+                Err((_, axum::Json(r))) => r,
+            }
+        }
+        "farm-view-cart" => {
+            let req: handlers::ViewCartRequest = serde_json::from_value(args_value).ok()?;
+            let axum::Json(r) = handlers::handle_view_cart(State(farm_state), Json(req)).await;
+            r
+        }
+        "farm-checkout" => {
+            let req: handlers::CheckoutRequest = serde_json::from_value(args_value).ok()?;
+            match handlers::handle_checkout(State(farm_state), State(merchant_db), Json(req)).await {
+                Ok((_, axum::Json(r))) => r,
+                Err((_, axum::Json(r))) => r,
+            }
+        }
+        "farm-clear-cart" => {
+            let req: handlers::ClearCartRequest = serde_json::from_value(args_value).ok()?;
+            let axum::Json(r) = handlers::handle_clear_cart(State(farm_state), Json(req)).await;
+            r
+        }
+        _ => return None,
+    };
+
+    let text = serde_json::to_string(&resp).unwrap_or_default();
+    Some(vec![json!({ "type": "text", "text": text })])
+}
+
 /// Handle MCP protocol requests
 async fn handle_mcp(
+    State(farm_state): State<SharedFarmState>,
+    State(merchant_db): State<farm::db::SharedMerchantDb>,
     Json(req): Json<McpRequest>,
 ) -> Result<(StatusCode, Json<McpResponse>), (StatusCode, Json<McpResponse>)> {
     tracing::info!("[MCP] Received request: method={}, id={:?}", req.method, req.id);
@@ -394,7 +465,13 @@ async fn handle_mcp(
                 }),
                 server_info: json!({
                     "name": "agent-b-mcp-server",
-                    "version": "1.0.0"
+                    "version": "1.1.0",
+                    "instructions": format!(
+                        "Agent B is a travel + farm merchant MCP server.\n\
+                         FLIGHT TOOLS: get-ticket-price, book-flight\n\
+                         {}",
+                        handlers::FARM_INSTRUCTIONS
+                    ),
                 }),
             };
 
@@ -407,7 +484,7 @@ async fn handle_mcp(
         }
 
         "tools/list" => {
-            let tools = vec![
+            let mut tools = vec![
                 McpTool {
                     name: "get-ticket-price".to_string(),
                     description: "Get flight ticket pricing based on route and passenger tier".to_string(),
@@ -457,6 +534,15 @@ async fn handle_mcp(
                     }),
                 },
             ];
+
+            // Add farm tool definitions
+            for def in handlers::farm_tool_definitions() {
+                tools.push(McpTool {
+                    name: def["name"].as_str().unwrap_or("").to_string(),
+                    description: def["description"].as_str().unwrap_or("").to_string(),
+                    input_schema: def["inputSchema"].clone(),
+                });
+            }
 
             let result = ToolsListResult { tools };
 
@@ -676,19 +762,37 @@ async fn handle_mcp(
                 }
 
                 _ => {
-                    Err((
-                        StatusCode::NOT_FOUND,
-                        Json(McpResponse {
-                            jsonrpc: "2.0".to_string(),
-                            id: req.id,
-                            result: None,
-                            error: Some(McpError {
-                                code: -32601,
-                                message: format!("Tool '{}' not found", tool_name),
-                                data: None,
-                            }),
-                        }),
-                    ))
+                    // Try farm tools
+                    let farm_result = dispatch_farm_tool(tool_name, tool_args, farm_state.clone(), merchant_db.clone()).await;
+                    match farm_result {
+                        Some(content) => {
+                            let result = ToolCallResult {
+                                content,
+                                is_error: false,
+                            };
+                            Ok((StatusCode::OK, Json(McpResponse {
+                                jsonrpc: "2.0".to_string(),
+                                id: req.id,
+                                result: Some(serde_json::to_value(result).unwrap()),
+                                error: None,
+                            })))
+                        }
+                        None => {
+                            Err((
+                                StatusCode::NOT_FOUND,
+                                Json(McpResponse {
+                                    jsonrpc: "2.0".to_string(),
+                                    id: req.id,
+                                    result: None,
+                                    error: Some(McpError {
+                                        code: -32601,
+                                        message: format!("Tool '{}' not found", tool_name),
+                                        data: None,
+                                    }),
+                                }),
+                            ))
+                        }
+                    }
                 }
             }
         }
@@ -734,8 +838,39 @@ async fn main() -> Result<()> {
         .init();
 
     println!("\n╔════════════════════════════════════════════════════════════╗");
-    println!("║          Agent B - MCP Server (Pricing & Booking)          ║");
+    println!("║      Agent B - MCP Server (Travel + Farm Merchant)        ║");
     println!("╚════════════════════════════════════════════════════════════╝\n");
+
+    // Open merchant database (SQLite)
+    let merchant_db = open_merchant_db()?;
+
+    // Check if merchant wallet is already enrolled
+    if let Some(wallet) = merchant_db.get_wallet_address() {
+        println!("✅ Merchant wallet: {}", wallet);
+        // Set env so X402Config picks it up
+        std::env::set_var("MERCHANT_WALLET_ADDRESS", &wallet);
+    } else {
+        println!("⚠️  Merchant wallet not enrolled — visit http://localhost:{{PORT}}/ to set up");
+    }
+
+    // Shared farm state
+    let farm_state = new_shared_state();
+
+    let app_state = AppState {
+        farm: farm_state,
+        merchant_db,
+    };
+
+    // Resolve static file directory (next to the binary or from STATIC_DIR env)
+    let static_dir = std::env::var("STATIC_DIR").unwrap_or_else(|_| {
+        // Look for static/ relative to the manifest dir (development), or next to binary
+        let dev_path = concat!(env!("CARGO_MANIFEST_DIR"), "/static");
+        if std::path::Path::new(dev_path).exists() {
+            dev_path.to_string()
+        } else {
+            "./static".to_string()
+        }
+    });
 
     // Build router
     let app = Router::new()
@@ -743,7 +878,28 @@ async fn main() -> Result<()> {
         .route("/tools", get(list_tools))
         .route("/tools/get-ticket-price", post(get_ticket_price))
         .route("/tools/book-flight", post(book_flight))
+        .route("/tools/farm-list-products", post(handlers::handle_list_products))
+        .route("/tools/farm-get-product", post(handlers::handle_get_product))
+        .route("/tools/farm-add-to-cart", post(handlers::handle_add_to_cart))
+        .route("/tools/farm-view-cart", post(handlers::handle_view_cart))
+        .route("/tools/farm-checkout", post(handlers::handle_checkout))
+        .route("/tools/farm-clear-cart", post(handlers::handle_clear_cart))
+        .route("/farm/checkout/:order_id", get(handlers::handle_checkout_verify))
         .route("/mcp", post(handle_mcp))
+        // Merchant API
+        .route("/api/merchant/status", get(handlers::handle_merchant_status))
+        .route("/api/merchant/balance", get(handlers::handle_merchant_balance))
+        .route("/api/merchant/send-otp", post(handlers::handle_send_otp))
+        .route("/api/merchant/verify-otp", post(handlers::handle_verify_otp))
+        .route("/api/products", get(handlers::handle_api_products))
+        .route("/api/products/:id/chains", get(handlers::handle_get_product_chains))
+        .route("/api/products/:id/chains", put(handlers::handle_set_product_chains))
+        // Admin / Test API
+        .route("/api/admin/tamper-mode", post(handlers::handle_tamper_mode))
+        .route("/api/admin/tamper-mode", get(handlers::handle_tamper_status))
+        // Static files (farm UI)
+        .fallback_service(ServeDir::new(&static_dir))
+        .with_state(app_state)
         .layer(CorsLayer::permissive());
 
     // Get port from environment variable or use default
@@ -768,9 +924,20 @@ async fn main() -> Result<()> {
     println!("📍 Attestation Service: {}\n", attester_url);
     
     println!("✓ Agent B MCP Server running on http://0.0.0.0:{}", port);
+    println!("  GET  /                          — Farm product page");
+    println!("  GET  /api/products              — Product catalog (JSON)");
+    println!("  GET  /api/merchant/status        — Merchant wallet status");
+    println!("  POST /api/merchant/send-otp      — Send enrollment OTP");
+    println!("  POST /api/merchant/verify-otp    — Verify OTP & create wallet");
     println!("  GET  /tools                     — List all tools");
     println!("  POST /tools/get-ticket-price    — Get flight pricing");
     println!("  POST /tools/book-flight         — Book a flight");
+    println!("  POST /tools/farm-list-products  — List farm products");
+    println!("  POST /tools/farm-get-product    — Get product details");
+    println!("  POST /tools/farm-add-to-cart    — Add to cart");
+    println!("  POST /tools/farm-view-cart      — View cart");
+    println!("  POST /tools/farm-checkout       — Checkout (x402)");
+    println!("  GET  /farm/checkout/:order_id   — x402 payment verify");
     println!("  POST /mcp                       — MCP protocol endpoint\n");
 
     

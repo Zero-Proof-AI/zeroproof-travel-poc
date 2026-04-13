@@ -1,0 +1,1056 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Green Acres Farm — Fresh from the Field</title>
+  <style>
+    :root {
+      --green: #2d6a4f;
+      --green-light: #52b788;
+      --green-bg: #f0faf4;
+      --amber: #e09f3e;
+      --red: #d62828;
+      --gray-100: #f8f9fa;
+      --gray-200: #e9ecef;
+      --gray-600: #6c757d;
+      --gray-800: #343a40;
+      --shadow: 0 2px 8px rgba(0,0,0,0.08);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--gray-100);
+      color: var(--gray-800);
+      line-height: 1.6;
+    }
+
+    /* ── Header ─────────────────────────────────────────── */
+    header {
+      background: var(--green);
+      color: white;
+      padding: 1.2rem 2rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      box-shadow: var(--shadow);
+    }
+    header h1 { font-size: 1.5rem; }
+    header h1 span { color: var(--green-light); }
+    .header-right { display: flex; align-items: center; gap: 1rem; }
+    .wallet-wrap {
+      position: relative;
+    }
+    .wallet-badge {
+      background: rgba(255,255,255,0.15);
+      padding: 0.4rem 0.8rem;
+      border-radius: 8px;
+      font-size: 0.85rem;
+      font-family: monospace;
+      cursor: pointer;
+    }
+    .wallet-badge.not-enrolled {
+      background: var(--amber);
+      color: #000;
+    }
+    .wallet-badge.enrolled:hover { background: rgba(255,255,255,0.25); }
+    .balance-popover {
+      display: none;
+      position: absolute;
+      top: calc(100% + 8px);
+      right: 0;
+      background: #fff;
+      border: 1px solid var(--gray-200);
+      border-radius: 10px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.12);
+      padding: 0.6rem;
+      z-index: 200;
+      min-width: 260px;
+      max-width: 320px;
+    }
+    .balance-popover.show { display: block; }
+    .balance-popover .bp-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 0.4rem;
+      padding: 0 0.2rem;
+    }
+    .balance-popover .bp-title { font-weight: 600; color: var(--green); font-size: 0.8rem; }
+    .balance-popover .bp-refresh {
+      background: none;
+      border: 1px solid var(--gray-200);
+      border-radius: 5px;
+      padding: 0.15rem 0.4rem;
+      cursor: pointer;
+      font-size: 0.75rem;
+      color: var(--gray-600);
+    }
+    .balance-popover .bp-refresh:hover { background: var(--gray-200); }
+    .chain-card {
+      background: var(--green-bg);
+      border: 1px solid var(--gray-200);
+      border-radius: 8px;
+      padding: 0.45rem 0.6rem;
+      margin-bottom: 0.35rem;
+    }
+    .chain-card:last-child { margin-bottom: 0; }
+    .chain-card .chain-name {
+      font-weight: 600;
+      font-size: 0.75rem;
+      color: var(--gray-600);
+      margin-bottom: 0.1rem;
+    }
+    .chain-card .balances {
+      display: flex;
+      gap: 0.8rem;
+      font-size: 0.82rem;
+    }
+    .balance-item {
+      display: flex;
+      align-items: center;
+      gap: 0.25rem;
+    }
+    .balance-item .label { color: var(--gray-600); font-size: 0.78rem; }
+    .balance-item .value { font-weight: 700; font-family: monospace; }
+    .balance-item .value.usdc { color: var(--green); }
+    .balance-item .value.eth { color: #627eea; }
+    .cart-btn {
+      background: var(--amber);
+      color: #000;
+      border: none;
+      padding: 0.5rem 1rem;
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 0.95rem;
+    }
+    .cart-btn:hover { opacity: 0.9; }
+
+    /* ── Banner ─────────────────────────────────────────── */
+    .banner {
+      background: linear-gradient(135deg, var(--green) 0%, var(--green-light) 100%);
+      color: white;
+      text-align: center;
+      padding: 2rem 1rem;
+    }
+    .banner p { opacity: 0.9; margin-top: 0.5rem; }
+
+    /* ── Enrollment banner ──────────────────────────────── */
+    .enroll-banner {
+      background: #fff3cd;
+      border-bottom: 2px solid var(--amber);
+      padding: 0.8rem 2rem;
+      text-align: center;
+      display: none;
+    }
+    .enroll-banner.show { display: block; }
+    .enroll-banner button {
+      background: var(--green);
+      color: white;
+      border: none;
+      padding: 0.4rem 1rem;
+      border-radius: 6px;
+      cursor: pointer;
+      margin-left: 0.5rem;
+    }
+
+    /* ── Category Filter ────────────────────────────────── */
+    .filters {
+      display: flex;
+      gap: 0.5rem;
+      padding: 1rem 2rem;
+      flex-wrap: wrap;
+    }
+    .filter-btn {
+      background: white;
+      border: 1px solid var(--gray-200);
+      padding: 0.4rem 1rem;
+      border-radius: 20px;
+      cursor: pointer;
+      font-size: 0.9rem;
+    }
+    .filter-btn.active {
+      background: var(--green);
+      color: white;
+      border-color: var(--green);
+    }
+
+    /* ── Product Grid ───────────────────────────────────── */
+    .products {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+      gap: 1.5rem;
+      padding: 1rem 2rem 3rem;
+    }
+    .product-card {
+      background: white;
+      border-radius: 12px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      transition: transform 0.15s;
+    }
+    .product-card:hover { transform: translateY(-2px); }
+    .product-img {
+      background: var(--green-bg);
+      height: 140px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 3rem;
+    }
+    .product-body { padding: 1rem; }
+    .product-body h3 { font-size: 1rem; margin-bottom: 0.3rem; }
+    .product-body .desc {
+      font-size: 0.85rem;
+      color: var(--gray-600);
+      margin-bottom: 0.6rem;
+    }
+    .product-body .meta {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .price {
+      font-weight: 700;
+      color: var(--green);
+      font-size: 1.1rem;
+    }
+    .unit { font-size: 0.8rem; color: var(--gray-600); }
+    .add-btn {
+      background: var(--green);
+      color: white;
+      border: none;
+      padding: 0.4rem 0.8rem;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.85rem;
+    }
+    .add-btn:hover { background: var(--green-light); }
+    .out-of-stock {
+      color: var(--red);
+      font-size: 0.85rem;
+      font-weight: 600;
+    }
+
+    /* ── Cart Sidebar ───────────────────────────────────── */
+    .cart-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.4);
+      z-index: 100;
+    }
+    .cart-overlay.open { display: block; }
+    .cart-panel {
+      position: fixed;
+      right: 0;
+      top: 0;
+      bottom: 0;
+      width: 380px;
+      max-width: 90vw;
+      background: white;
+      z-index: 101;
+      box-shadow: -4px 0 20px rgba(0,0,0,0.15);
+      display: flex;
+      flex-direction: column;
+      transform: translateX(100%);
+      transition: transform 0.25s ease;
+    }
+    .cart-overlay.open .cart-panel { transform: translateX(0); }
+    .cart-header {
+      padding: 1rem;
+      border-bottom: 1px solid var(--gray-200);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .cart-header h2 { font-size: 1.2rem; }
+    .close-cart {
+      background: none;
+      border: none;
+      font-size: 1.5rem;
+      cursor: pointer;
+    }
+    .cart-items {
+      flex: 1;
+      overflow-y: auto;
+      padding: 1rem;
+    }
+    .cart-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 0.6rem 0;
+      border-bottom: 1px solid var(--gray-200);
+    }
+    .cart-item-info { flex: 1; }
+    .cart-item-name { font-weight: 600; font-size: 0.95rem; }
+    .cart-item-qty { color: var(--gray-600); font-size: 0.85rem; }
+    .cart-item-price { font-weight: 600; min-width: 60px; text-align: right; }
+    .cart-item-remove {
+      background: none;
+      border: none;
+      color: var(--red);
+      cursor: pointer;
+      font-size: 1.1rem;
+      margin-left: 0.5rem;
+    }
+    .cart-footer {
+      padding: 1rem;
+      border-top: 1px solid var(--gray-200);
+    }
+    .cart-total {
+      display: flex;
+      justify-content: space-between;
+      font-size: 1.1rem;
+      font-weight: 700;
+      margin-bottom: 1rem;
+    }
+    .checkout-btn {
+      width: 100%;
+      padding: 0.8rem;
+      background: var(--green);
+      color: white;
+      border: none;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .checkout-btn:hover { background: var(--green-light); }
+    .checkout-btn:disabled { background: var(--gray-600); cursor: not-allowed; }
+    .empty-cart { text-align: center; color: var(--gray-600); padding: 2rem; }
+
+    /* ── Enrollment Modal ───────────────────────────────── */
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.5);
+      z-index: 200;
+      align-items: center;
+      justify-content: center;
+    }
+    .modal-overlay.open { display: flex; }
+    .modal {
+      background: white;
+      border-radius: 12px;
+      padding: 2rem;
+      width: 400px;
+      max-width: 90vw;
+      box-shadow: 0 8px 30px rgba(0,0,0,0.2);
+    }
+    .modal h2 { margin-bottom: 0.5rem; }
+    .modal p { color: var(--gray-600); font-size: 0.9rem; margin-bottom: 1.2rem; }
+    .modal label { font-weight: 600; font-size: 0.9rem; display: block; margin-bottom: 0.3rem; }
+    .modal input {
+      width: 100%;
+      padding: 0.6rem;
+      border: 1px solid var(--gray-200);
+      border-radius: 6px;
+      font-size: 1rem;
+      margin-bottom: 1rem;
+    }
+    .modal .btn-row { display: flex; gap: 0.5rem; }
+    .modal .btn-primary {
+      flex: 1;
+      padding: 0.6rem;
+      background: var(--green);
+      color: white;
+      border: none;
+      border-radius: 6px;
+      font-size: 0.95rem;
+      cursor: pointer;
+    }
+    .modal .btn-secondary {
+      padding: 0.6rem 1rem;
+      background: var(--gray-200);
+      border: none;
+      border-radius: 6px;
+      font-size: 0.95rem;
+      cursor: pointer;
+    }
+    .modal .error { color: var(--red); font-size: 0.85rem; margin-bottom: 0.5rem; display: none; }
+    .modal .success { color: var(--green); font-size: 0.85rem; margin-bottom: 0.5rem; display: none; }
+    .modal .spinner { display: none; text-align: center; padding: 1rem; }
+
+    /* ── Toast ──────────────────────────────────────────── */
+    .toast {
+      position: fixed;
+      bottom: 2rem;
+      left: 50%;
+      transform: translateX(-50%) translateY(100px);
+      background: var(--green);
+      color: white;
+      padding: 0.6rem 1.2rem;
+      border-radius: 8px;
+      font-size: 0.9rem;
+      z-index: 300;
+      transition: transform 0.3s ease;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+    }
+    .toast.show { transform: translateX(-50%) translateY(0); }
+
+    /* ── Chain Editor (product card) ────────────────────── */
+    .product-card { position: relative; }
+    .chain-edit-btn {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      width: 28px; height: 28px;
+      border-radius: 50%;
+      border: none;
+      background: rgba(255,255,255,0.85);
+      cursor: pointer;
+      font-size: 1rem;
+      line-height: 28px;
+      text-align: center;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.15);
+      z-index: 2;
+      transition: background 0.15s;
+    }
+    .chain-edit-btn:hover { background: white; }
+    .chain-popover {
+      display: none;
+      position: absolute;
+      top: 40px;
+      right: 8px;
+      background: white;
+      border-radius: 10px;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.18);
+      padding: 0.8rem;
+      z-index: 10;
+      width: 210px;
+    }
+    .chain-popover.open { display: block; }
+    .chain-popover h4 {
+      font-size: 0.8rem;
+      color: var(--gray-600);
+      margin-bottom: 0.5rem;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .chain-popover label {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.35rem 0;
+      font-size: 0.88rem;
+      cursor: pointer;
+    }
+    .chain-popover input[type="checkbox"] {
+      accent-color: var(--green);
+      width: 16px; height: 16px;
+    }
+    .chain-popover .cp-save {
+      margin-top: 0.5rem;
+      width: 100%;
+      padding: 0.35rem;
+      background: var(--green);
+      color: white;
+      border: none;
+      border-radius: 6px;
+      font-size: 0.82rem;
+      cursor: pointer;
+    }
+    .chain-popover .cp-save:hover { background: var(--green-light); }
+    .chain-popover .cp-save:disabled { opacity: 0.5; cursor: default; }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header>
+    <h1>🌿 <span>Green Acres</span> Farm</h1>
+    <div class="header-right">
+      <!-- Admin: Tamper Mode Toggle -->
+      <div class="tamper-toggle" id="tamperToggle" title="Tamper mode: inflates checkout total for unhappy-path testing">
+        <label style="display:flex;align-items:center;gap:0.4rem;cursor:pointer;font-size:0.82rem;color:rgba(255,255,255,0.85);">
+          <input type="checkbox" id="tamperCheckbox" onchange="toggleTamperMode(this.checked)" style="accent-color:var(--red);width:15px;height:15px;" />
+          🧪 Tamper
+        </label>
+      </div>
+      <div class="wallet-wrap" id="walletWrap">
+        <div class="wallet-badge not-enrolled" id="walletBadge" onclick="openEnrollModal()">
+          ⚠️ Wallet not set up
+        </div>
+        <div class="balance-popover" id="balancePopover">
+          <div class="bp-header">
+            <span class="bp-title">Balances</span>
+            <button class="bp-refresh" onclick="event.stopPropagation(); fetchBalance()">↻</button>
+          </div>
+          <div id="balanceChains">
+            <span style="color:var(--gray-600);font-size:0.82rem">Loading…</span>
+          </div>
+        </div>
+      </div>
+      <button class="cart-btn" onclick="toggleCart()">
+        🛒 Cart (<span id="cartCount">0</span>)
+      </button>
+    </div>
+  </header>
+
+  <!-- Enrollment Warning Banner -->
+  <div class="enroll-banner show" id="enrollBanner">
+    ⚠️ Merchant wallet not configured. Payments won't work until you enroll.
+    <button onclick="openEnrollModal()">Set Up Wallet</button>
+  </div>
+
+  <!-- Banner -->
+  <div class="banner">
+    <h2>Farm-to-Table, Delivered Fresh</h2>
+    <p>Pasture-raised meats, free-range eggs & raw dairy — straight from our fields to your door.</p>
+  </div>
+
+  <!-- Category Filters -->
+  <div class="filters" id="filters"></div>
+
+  <!-- Product Grid -->
+  <div class="products" id="productGrid"></div>
+
+  <!-- Cart Sidebar -->
+  <div class="cart-overlay" id="cartOverlay" onclick="toggleCart()">
+    <div class="cart-panel" onclick="event.stopPropagation()">
+      <div class="cart-header">
+        <h2>Your Cart</h2>
+        <button class="close-cart" onclick="toggleCart()">✕</button>
+      </div>
+      <div class="cart-items" id="cartItems">
+        <div class="empty-cart">Your cart is empty</div>
+      </div>
+      <div class="cart-footer">
+        <div class="cart-total">
+          <span>Total</span>
+          <span id="cartTotal">$0.00</span>
+        </div>
+        <button class="checkout-btn" id="checkoutBtn" onclick="checkout()" disabled>
+          Pay with Crypto (x402)
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Enrollment Modal -->
+  <div class="modal-overlay" id="enrollModal">
+    <div class="modal">
+      <!-- Step 1: Email -->
+      <div id="enrollStep1">
+        <h2>🔐 Set Up Merchant Wallet</h2>
+        <p>Enter your email to receive a verification code. This creates a secure MPC wallet for receiving crypto payments.</p>
+        <div class="error" id="otpError"></div>
+        <label for="merchantEmail">Email Address</label>
+        <input type="email" id="merchantEmail" placeholder="farmer@greenacres.com" />
+        <div class="btn-row">
+          <button class="btn-secondary" onclick="closeEnrollModal()">Cancel</button>
+          <button class="btn-primary" id="sendOtpBtn" onclick="sendOtp()">Send Verification Code</button>
+        </div>
+        <div class="spinner" id="otpSpinner">Sending code...</div>
+      </div>
+
+      <!-- Step 2: OTP -->
+      <div id="enrollStep2" style="display:none">
+        <h2>📧 Enter Verification Code</h2>
+        <p>We sent a 6-digit code to <strong id="otpEmailDisplay"></strong></p>
+        <div class="error" id="verifyError"></div>
+        <label for="otpCode">Verification Code</label>
+        <input type="text" id="otpCode" placeholder="123456" maxlength="6" pattern="[0-9]{6}" />
+        <div class="btn-row">
+          <button class="btn-secondary" onclick="backToStep1()">Back</button>
+          <button class="btn-primary" id="verifyOtpBtn" onclick="verifyOtp()">Verify & Create Wallet</button>
+        </div>
+        <div class="spinner" id="verifySpinner">Creating wallet (this may take ~15s)...</div>
+      </div>
+
+      <!-- Step 3: Success -->
+      <div id="enrollStep3" style="display:none">
+        <h2>✅ Wallet Created!</h2>
+        <p>Your merchant wallet is ready to receive payments.</p>
+        <div style="background:var(--green-bg);padding:0.8rem;border-radius:8px;margin-bottom:1rem;word-break:break-all;font-family:monospace;font-size:0.85rem;" id="walletDisplay"></div>
+        <div class="btn-row">
+          <button class="btn-primary" onclick="closeEnrollModal()">Start Selling</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div class="toast" id="toast"></div>
+
+  <script>
+    // ── State ──────────────────────────────────────────────
+    let products = [];
+    let cart = [];
+    let activeCategory = null;
+    let merchantWallet = null;
+
+    const EMOJIS = {
+      dairy: '🧀', meat: '🥩', poultry: '🐔', produce: '🥬'
+    };
+
+    // ── Init ──────────────────────────────────────────────
+    async function init() {
+      await checkMerchantStatus();
+      await loadProducts();
+      await checkTamperStatus();
+    }
+
+    // ── Tamper Mode (Admin) ───────────────────────────────
+    async function checkTamperStatus() {
+      try {
+        const resp = await fetch('/api/admin/tamper-mode');
+        const data = await resp.json();
+        document.getElementById('tamperCheckbox').checked = data.tamper_mode;
+      } catch (e) { /* ignore */ }
+    }
+
+    async function toggleTamperMode(enabled) {
+      try {
+        const resp = await fetch('/api/admin/tamper-mode', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled, multiplier: 3.0 })
+        });
+        const data = await resp.json();
+        showToast(data.tamper_mode
+          ? `🧪 Tamper ON — checkout totals ×${data.multiplier}`
+          : '✅ Tamper OFF — normal pricing');
+      } catch (e) {
+        showToast('Failed to toggle tamper mode');
+        document.getElementById('tamperCheckbox').checked = !enabled;
+      }
+    }
+
+    async function checkMerchantStatus() {
+      try {
+        const resp = await fetch('/api/merchant/status');
+        const data = await resp.json();
+        if (data.enrolled && data.wallet_address) {
+          merchantWallet = data.wallet_address;
+          setWalletUI(data.wallet_address);
+        }
+      } catch (e) {
+        console.warn('Could not check merchant status:', e);
+      }
+    }
+
+    function setWalletUI(addr) {
+      const badge = document.getElementById('walletBadge');
+      badge.className = 'wallet-badge enrolled';
+      badge.onclick = toggleBalancePopover;
+      badge.textContent = addr.slice(0, 6) + '…' + addr.slice(-4);
+      document.getElementById('enrollBanner').classList.remove('show');
+      fetchBalance();
+    }
+
+    function toggleBalancePopover(e) {
+      e.stopPropagation();
+      const pop = document.getElementById('balancePopover');
+      const showing = pop.classList.toggle('show');
+      if (showing) fetchBalance();
+    }
+
+    // Close popover when clicking outside
+    document.addEventListener('click', (e) => {
+      const wrap = document.getElementById('walletWrap');
+      if (wrap && !wrap.contains(e.target)) {
+        document.getElementById('balancePopover').classList.remove('show');
+      }
+    });
+
+    async function fetchBalance() {
+      try {
+        const resp = await fetch('/api/merchant/balance');
+        const data = await resp.json();
+        if (data.error) return;
+        const container = document.getElementById('balanceChains');
+        if (!data.chains || data.chains.length === 0) {
+          container.innerHTML = '<span style="color:var(--gray-600);font-size:0.82rem">No chain data</span>';
+          return;
+        }
+        container.innerHTML = data.chains.map(c => `
+          <div class="chain-card">
+            <div class="chain-name">${c.chain_name}</div>
+            <div class="balances">
+              <div class="balance-item">
+                <span class="label">USDC</span>
+                <span class="value usdc">${Number(c.usdc).toFixed(2)}</span>
+              </div>
+              <div class="balance-item">
+                <span class="label">ETH</span>
+                <span class="value eth">${Number(c.eth).toFixed(6)}</span>
+              </div>
+            </div>
+          </div>
+        `).join('');
+      } catch (e) {
+        console.warn('Balance fetch failed:', e);
+      }
+    }
+
+    async function loadProducts() {
+      try {
+        const resp = await fetch('/api/products');
+        products = await resp.json();
+      } catch (e) {
+        console.error('Failed to load products:', e);
+        products = [];
+      }
+      renderFilters();
+      renderProducts();
+    }
+
+    // ── Filters ───────────────────────────────────────────
+    function renderFilters() {
+      const cats = [...new Set(products.map(p => p.category))];
+      const el = document.getElementById('filters');
+      el.innerHTML = `<button class="filter-btn active" onclick="filterCategory(null, this)">All</button>` +
+        cats.map(c => `<button class="filter-btn" onclick="filterCategory('${c}', this)">${c.charAt(0).toUpperCase() + c.slice(1)}</button>`).join('');
+    }
+
+    function filterCategory(cat, btn) {
+      activeCategory = cat;
+      document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      renderProducts();
+    }
+
+    // ── Products ──────────────────────────────────────────
+    function renderProducts() {
+      const filtered = activeCategory
+        ? products.filter(p => p.category === activeCategory)
+        : products;
+
+      document.getElementById('productGrid').innerHTML = filtered.map(p => `
+        <div class="product-card" id="pc-${p.id}">
+          <button class="chain-edit-btn" title="Payment chains" onclick="event.stopPropagation(); toggleChainEditor('${p.id}')">⚙</button>
+          <div class="chain-popover" id="cp-${p.id}"></div>
+          <div class="product-img">${EMOJIS[p.category] || '🌱'}</div>
+          <div class="product-body">
+            <h3>${esc(p.name)}</h3>
+            <div class="desc">${esc(p.description)}</div>
+            <div class="meta">
+              <div>
+                <span class="price">$${(p.price_cents / 100).toFixed(2)}</span>
+                <span class="unit">/ ${esc(p.unit)}</span>
+              </div>
+              ${p.in_stock
+                ? `<button class="add-btn" onclick="addToCart('${p.id}')">Add to Cart</button>`
+                : `<span class="out-of-stock">Out of Stock</span>`}
+            </div>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    // ── Cart ──────────────────────────────────────────────
+    function addToCart(productId) {
+      const product = products.find(p => p.id === productId);
+      if (!product) return;
+
+      const existing = cart.find(c => c.product_id === productId);
+      if (existing) {
+        existing.quantity++;
+      } else {
+        cart.push({
+          product_id: productId,
+          name: product.name,
+          unit_price_cents: product.price_cents,
+          quantity: 1
+        });
+      }
+      updateCartUI();
+      showToast(`${product.name} added to cart`);
+    }
+
+    function removeFromCart(productId) {
+      cart = cart.filter(c => c.product_id !== productId);
+      updateCartUI();
+    }
+
+    function updateCartUI() {
+      const totalItems = cart.reduce((s, c) => s + c.quantity, 0);
+      const totalCents = cart.reduce((s, c) => s + c.unit_price_cents * c.quantity, 0);
+      document.getElementById('cartCount').textContent = totalItems;
+      document.getElementById('cartTotal').textContent = '$' + (totalCents / 100).toFixed(2);
+      document.getElementById('checkoutBtn').disabled = cart.length === 0;
+
+      const el = document.getElementById('cartItems');
+      if (cart.length === 0) {
+        el.innerHTML = '<div class="empty-cart">Your cart is empty</div>';
+        return;
+      }
+      el.innerHTML = cart.map(c => `
+        <div class="cart-item">
+          <div class="cart-item-info">
+            <div class="cart-item-name">${esc(c.name)}</div>
+            <div class="cart-item-qty">Qty: ${c.quantity} × $${(c.unit_price_cents / 100).toFixed(2)}</div>
+          </div>
+          <div class="cart-item-price">$${(c.unit_price_cents * c.quantity / 100).toFixed(2)}</div>
+          <button class="cart-item-remove" onclick="removeFromCart('${c.product_id}')">✕</button>
+        </div>
+      `).join('');
+    }
+
+    function toggleCart() {
+      document.getElementById('cartOverlay').classList.toggle('open');
+    }
+
+    // ── Checkout ──────────────────────────────────────────
+    async function checkout() {
+      if (!merchantWallet) {
+        openEnrollModal();
+        showToast('Please set up your wallet first');
+        return;
+      }
+
+      const btn = document.getElementById('checkoutBtn');
+      btn.disabled = true;
+      btn.textContent = 'Processing...';
+
+      try {
+        // Use the first cart item for now via the farm-checkout MCP tool
+        const sessionId = 'web-' + Date.now();
+        // Add items to cart on server
+        for (const item of cart) {
+          await fetch('/tools/farm-add-to-cart', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              session_id: sessionId,
+              product_id: item.product_id,
+              quantity: item.quantity
+            })
+          });
+        }
+
+        // Checkout
+        const resp = await fetch('/tools/farm-checkout', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            session_id: sessionId,
+            payment_method: 'x402_crypto'
+          })
+        });
+
+        const data = await resp.json();
+        if (data.result && data.result.payment_url) {
+          showToast('Redirecting to payment...');
+          window.open(data.result.payment_url, '_blank');
+        } else {
+          showToast('Checkout started — complete payment via your agent');
+        }
+
+        cart = [];
+        updateCartUI();
+        toggleCart();
+      } catch (e) {
+        showToast('Checkout failed: ' + e.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Pay with Crypto (x402)';
+      }
+    }
+
+    // ── Enrollment ────────────────────────────────────────
+    let enrollEmail = '';
+
+    function openEnrollModal() {
+      document.getElementById('enrollModal').classList.add('open');
+      document.getElementById('enrollStep1').style.display = 'block';
+      document.getElementById('enrollStep2').style.display = 'none';
+      document.getElementById('enrollStep3').style.display = 'none';
+    }
+
+    function closeEnrollModal() {
+      document.getElementById('enrollModal').classList.remove('open');
+    }
+
+    function backToStep1() {
+      document.getElementById('enrollStep1').style.display = 'block';
+      document.getElementById('enrollStep2').style.display = 'none';
+    }
+
+    async function sendOtp() {
+      const email = document.getElementById('merchantEmail').value.trim();
+      if (!email) {
+        showError('otpError', 'Please enter your email');
+        return;
+      }
+
+      enrollEmail = email;
+      const btn = document.getElementById('sendOtpBtn');
+      const spinner = document.getElementById('otpSpinner');
+      btn.style.display = 'none';
+      spinner.style.display = 'block';
+      hideError('otpError');
+
+      try {
+        const resp = await fetch('/api/merchant/send-otp', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email })
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Failed to send OTP');
+
+        document.getElementById('otpEmailDisplay').textContent = email;
+        document.getElementById('enrollStep1').style.display = 'none';
+        document.getElementById('enrollStep2').style.display = 'block';
+
+        // In dev mode, auto-fill the OTP
+        if (data.code) {
+          document.getElementById('otpCode').value = data.code;
+        }
+      } catch (e) {
+        showError('otpError', e.message);
+      } finally {
+        btn.style.display = '';
+        spinner.style.display = 'none';
+      }
+    }
+
+    async function verifyOtp() {
+      const otp = document.getElementById('otpCode').value.trim();
+      if (!otp || otp.length !== 6) {
+        showError('verifyError', 'Please enter the 6-digit code');
+        return;
+      }
+
+      const btn = document.getElementById('verifyOtpBtn');
+      const spinner = document.getElementById('verifySpinner');
+      btn.style.display = 'none';
+      spinner.style.display = 'block';
+      hideError('verifyError');
+
+      try {
+        const resp = await fetch('/api/merchant/verify-otp', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: enrollEmail, otp })
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Verification failed');
+
+        merchantWallet = data.wallet_address;
+        setWalletUI(data.wallet_address);
+
+        document.getElementById('walletDisplay').textContent = data.wallet_address;
+        document.getElementById('enrollStep2').style.display = 'none';
+        document.getElementById('enrollStep3').style.display = 'block';
+      } catch (e) {
+        showError('verifyError', e.message);
+      } finally {
+        btn.style.display = '';
+        spinner.style.display = 'none';
+      }
+    }
+
+    // ── Helpers ───────────────────────────────────────────
+    function showToast(msg) {
+      const t = document.getElementById('toast');
+      t.textContent = msg;
+      t.classList.add('show');
+      setTimeout(() => t.classList.remove('show'), 2500);
+    }
+
+    function showError(id, msg) {
+      const el = document.getElementById(id);
+      el.textContent = msg;
+      el.style.display = 'block';
+    }
+    function hideError(id) {
+      document.getElementById(id).style.display = 'none';
+    }
+
+    function esc(str) {
+      const d = document.createElement('div');
+      d.textContent = str;
+      return d.innerHTML;
+    }
+
+    // ── Chain Editor (per-product x402 payment chains) ──
+    let openChainPopover = null;
+
+    async function toggleChainEditor(productId) {
+      const popEl = document.getElementById('cp-' + productId);
+      // Close any other open popover
+      if (openChainPopover && openChainPopover !== productId) {
+        const prev = document.getElementById('cp-' + openChainPopover);
+        if (prev) prev.classList.remove('open');
+      }
+      if (popEl.classList.contains('open')) {
+        popEl.classList.remove('open');
+        openChainPopover = null;
+        return;
+      }
+      openChainPopover = productId;
+
+      // Fetch current prefs
+      popEl.innerHTML = '<span style="font-size:0.82rem;color:var(--gray-600)">Loading…</span>';
+      popEl.classList.add('open');
+
+      try {
+        const resp = await fetch('/api/products/' + encodeURIComponent(productId) + '/chains');
+        const data = await resp.json();
+        const chains = data.chains || [];
+
+        popEl.innerHTML = `
+          <h4>Agent Payment Chains</h4>
+          ${chains.map(c => `
+            <label>
+              <input type="checkbox" data-chain="${c.chain_id}" ${c.enabled ? 'checked' : ''} />
+              ${esc(c.chain_name)}
+            </label>
+          `).join('')}
+          <button class="cp-save" onclick="saveChainPrefs('${productId}')">Save</button>
+        `;
+      } catch (e) {
+        popEl.innerHTML = '<span style="color:var(--red);font-size:0.82rem">Failed to load</span>';
+      }
+    }
+
+    async function saveChainPrefs(productId) {
+      const popEl = document.getElementById('cp-' + productId);
+      const boxes = popEl.querySelectorAll('input[type="checkbox"]');
+      const selected = [];
+      boxes.forEach(cb => { if (cb.checked) selected.push(Number(cb.dataset.chain)); });
+
+      const btn = popEl.querySelector('.cp-save');
+      btn.disabled = true;
+      btn.textContent = 'Saving…';
+
+      try {
+        const resp = await fetch('/api/products/' + encodeURIComponent(productId) + '/chains', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chains: selected })
+        });
+        if (!resp.ok) throw new Error('Save failed');
+        showToast('Chain preferences saved');
+        popEl.classList.remove('open');
+        openChainPopover = null;
+      } catch (e) {
+        btn.textContent = 'Save';
+        btn.disabled = false;
+        showToast('Failed to save preferences');
+      }
+    }
+
+    // Close chain popover on outside click
+    document.addEventListener('click', (e) => {
+      if (openChainPopover && !e.target.closest('.chain-popover') && !e.target.closest('.chain-edit-btn')) {
+        const el = document.getElementById('cp-' + openChainPopover);
+        if (el) el.classList.remove('open');
+        openChainPopover = null;
+      }
+    });
+
+    // ── Boot ──────────────────────────────────────────────
+    init();
+  </script>
+</body>
+</html>

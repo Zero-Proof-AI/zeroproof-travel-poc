@@ -12,7 +12,7 @@ tokio = { version = "1", features = ["full"] }
 # HTTP & REST
 axum = "0.7"
 tower = "0.4"
-tower-http = { version = "0.5", features = ["cors"] }
+tower-http = { version = "0.5", features = ["cors", "fs"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -50,8 +50,23 @@ dotenv = "0.15"
 # Local pricing core
 pricing-core = { path = "../pricing-core", features = ["http"] }
 
+# Local farm core
+farm-core = { path = "../farm-core" }
+
+# UUID generation
+uuid = { version = "1.0", features = ["v4"] }
+
+# Base64 encoding
+base64 = "0.22"
+
 # Shared utilities
 shared = { path = "../shared" }
+
+# SQLite
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# Async combinators
+futures = "0.3"
 
 [profile.release]
 opt-level = 3

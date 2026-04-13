@@ -50,10 +50,15 @@ ingress:
   hosts:
     - host: dev.agentb.zeroproofai.com
       paths: ["/"]
+    - host: merchant.zeroproof.com
+      paths: ["/"]
   tls:
     - secretName: agentb-zeroproofai-dev-tls
       hosts:
         - dev.agentb.zeroproofai.com
+    - secretName: merchant-zeroproof-tls
+      hosts:
+        - merchant.zeroproof.com
 
 resources:
   limits:
