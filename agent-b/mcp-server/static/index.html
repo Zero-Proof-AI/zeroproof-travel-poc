@@ -466,6 +466,68 @@
     }
     .chain-popover .cp-save:hover { background: var(--green-light); }
     .chain-popover .cp-save:disabled { opacity: 0.5; cursor: default; }
+
+    /* ── View Toggle (Shop / Orders) ────────────────────── */
+    .view-toggle { display: flex; gap: 0.3rem; }
+    .view-toggle button {
+      background: rgba(255,255,255,0.15);
+      color: white;
+      border: none;
+      padding: 0.4rem 0.8rem;
+      border-radius: 8px;
+      font-size: 0.85rem;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .view-toggle button:hover { background: rgba(255,255,255,0.25); }
+    .view-toggle button.active { background: rgba(255,255,255,0.35); font-weight: 600; }
+
+    /* ── Orders Panel ───────────────────────────────────── */
+    .orders-panel { display: none; max-width: 960px; margin: 2rem auto; padding: 0 1rem; }
+    .orders-panel.show { display: block; }
+    .orders-panel h2 { margin-bottom: 1rem; font-size: 1.3rem; }
+    .orders-table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 10px; overflow: hidden; box-shadow: var(--shadow); }
+    .orders-table th {
+      background: var(--green);
+      color: white;
+      text-align: left;
+      padding: 0.7rem 0.8rem;
+      font-size: 0.82rem;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .orders-table td { padding: 0.6rem 0.8rem; border-bottom: 1px solid var(--gray-200); font-size: 0.88rem; vertical-align: top; }
+    .orders-table tr:last-child td { border-bottom: none; }
+    .orders-table tr:hover td { background: var(--green-bg); }
+    .status-badge {
+      display: inline-block;
+      padding: 0.15rem 0.5rem;
+      border-radius: 999px;
+      font-size: 0.78rem;
+      font-weight: 600;
+      text-transform: capitalize;
+    }
+    .status-badge.pending_payment { background: #fff3cd; color: #856404; }
+    .status-badge.paid { background: #d4edda; color: #155724; }
+    .status-badge.shipped { background: #cce5ff; color: #004085; }
+    .status-badge.cancelled { background: #f8d7da; color: #721c24; }
+    .order-actions { display: flex; gap: 0.3rem; }
+    .order-actions button {
+      padding: 0.25rem 0.5rem;
+      border: none;
+      border-radius: 6px;
+      font-size: 0.78rem;
+      cursor: pointer;
+      font-weight: 500;
+    }
+    .btn-ship { background: var(--green-light); color: #fff; }
+    .btn-ship:hover { background: var(--green); }
+    .btn-cancel { background: var(--gray-200); color: var(--gray-800); }
+    .btn-cancel:hover { background: var(--red); color: #fff; }
+    .order-items-list { font-size: 0.82rem; color: var(--gray-600); }
+    .orders-empty { text-align: center; padding: 3rem; color: var(--gray-600); font-size: 0.95rem; }
+    .orders-refresh { background: var(--green); color: #fff; border: none; padding: 0.4rem 0.9rem; border-radius: 8px; font-size: 0.85rem; cursor: pointer; margin-bottom: 1rem; }
+    .orders-refresh:hover { background: var(--green-light); }
   </style>
 </head>
 <body>
@@ -480,6 +542,10 @@
           <input type="checkbox" id="tamperCheckbox" onchange="toggleTamperMode(this.checked)" style="accent-color:var(--red);width:15px;height:15px;" />
           🧪 Tamper
         </label>
+      </div>
+      <div class="view-toggle">
+        <button class="active" id="viewShopBtn" onclick="switchView('shop')">🛍️ Shop</button>
+        <button id="viewOrdersBtn" onclick="switchView('orders')">📦 Orders</button>
       </div>
       <div class="wallet-wrap" id="walletWrap">
         <div class="wallet-badge not-enrolled" id="walletBadge" onclick="openEnrollModal()">
@@ -513,11 +579,23 @@
     <p>Pasture-raised meats, free-range eggs & raw dairy — straight from our fields to your door.</p>
   </div>
 
-  <!-- Category Filters -->
-  <div class="filters" id="filters"></div>
+  <!-- Shop View -->
+  <div id="shopView">
+    <!-- Category Filters -->
+    <div class="filters" id="filters"></div>
 
-  <!-- Product Grid -->
-  <div class="products" id="productGrid"></div>
+    <!-- Product Grid -->
+    <div class="products" id="productGrid"></div>
+  </div>
+
+  <!-- Orders View -->
+  <div class="orders-panel" id="ordersPanel">
+    <h2>📦 Incoming Orders</h2>
+    <button class="orders-refresh" onclick="loadOrders()">↻ Refresh</button>
+    <div id="ordersContent">
+      <div class="orders-empty">Loading orders…</div>
+    </div>
+  </div>
 
   <!-- Cart Sidebar -->
   <div class="cart-overlay" id="cartOverlay" onclick="toggleCart()">
@@ -1065,6 +1143,114 @@
         openChainPopover = null;
       }
     });
+
+    // ── View Switching (Shop ↔ Orders) ──────────────────
+    function switchView(view) {
+      const shopView = document.getElementById('shopView');
+      const ordersPanel = document.getElementById('ordersPanel');
+      const shopBtn = document.getElementById('viewShopBtn');
+      const ordersBtn = document.getElementById('viewOrdersBtn');
+
+      if (view === 'orders') {
+        shopView.style.display = 'none';
+        ordersPanel.classList.add('show');
+        shopBtn.classList.remove('active');
+        ordersBtn.classList.add('active');
+        loadOrders();
+      } else {
+        shopView.style.display = '';
+        ordersPanel.classList.remove('show');
+        shopBtn.classList.add('active');
+        ordersBtn.classList.remove('active');
+      }
+    }
+
+    // ── Orders Management ─────────────────────────────────
+    async function loadOrders() {
+      const container = document.getElementById('ordersContent');
+      try {
+        const resp = await fetch('/api/orders');
+        const data = await resp.json();
+        const orders = data.orders || [];
+
+        if (orders.length === 0) {
+          container.innerHTML = '<div class="orders-empty">No orders yet. Orders will appear here when customers check out.</div>';
+          return;
+        }
+
+        container.innerHTML = `
+          <table class="orders-table">
+            <thead>
+              <tr>
+                <th>Order ID</th>
+                <th>Items</th>
+                <th>Total</th>
+                <th>Status</th>
+                <th>Payment</th>
+                <th>Date</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${orders.map(o => `
+                <tr>
+                  <td style="font-family:monospace;font-size:0.8rem">${esc(o.order_id)}</td>
+                  <td class="order-items-list">${formatOrderItems(o.items)}</td>
+                  <td><strong>${esc(o.total)}</strong></td>
+                  <td><span class="status-badge ${o.status}">${formatStatus(o.status)}</span></td>
+                  <td style="font-size:0.82rem">${esc(o.payment_method)}${o.tx_hash ? '<br><span style="font-family:monospace;font-size:0.75rem;color:var(--gray-600)">' + o.tx_hash.slice(0,10) + '…</span>' : ''}</td>
+                  <td style="font-size:0.82rem;white-space:nowrap">${formatDate(o.created_at)}</td>
+                  <td class="order-actions">${renderOrderActions(o)}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        `;
+      } catch (e) {
+        container.innerHTML = '<div class="orders-empty" style="color:var(--red)">Failed to load orders: ' + esc(e.message) + '</div>';
+      }
+    }
+
+    function formatOrderItems(items) {
+      if (!Array.isArray(items)) return '—';
+      return items.map(i => `${esc(i.name || i.product_id)} ×${i.quantity}`).join('<br>');
+    }
+
+    function formatStatus(s) {
+      return (s || '').replace(/_/g, ' ');
+    }
+
+    function formatDate(d) {
+      if (!d) return '—';
+      try { return new Date(d + 'Z').toLocaleString(); } catch { return d; }
+    }
+
+    function renderOrderActions(order) {
+      if (order.status === 'paid') {
+        return `<button class="btn-ship" onclick="updateOrderStatus('${order.order_id}', 'shipped')">🚚 Ship</button>
+                <button class="btn-cancel" onclick="updateOrderStatus('${order.order_id}', 'cancelled')">✕</button>`;
+      }
+      if (order.status === 'pending_payment') {
+        return `<button class="btn-cancel" onclick="updateOrderStatus('${order.order_id}', 'cancelled')">✕ Cancel</button>`;
+      }
+      return '<span style="color:var(--gray-600);font-size:0.8rem">—</span>';
+    }
+
+    async function updateOrderStatus(orderId, status) {
+      try {
+        const resp = await fetch('/api/orders/' + encodeURIComponent(orderId) + '/status', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status })
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Failed');
+        showToast(`Order ${orderId.slice(-8)} → ${status}`);
+        loadOrders();
+      } catch (e) {
+        showToast('Failed: ' + e.message);
+      }
+    }
 
     // ── Boot ──────────────────────────────────────────────
     init();

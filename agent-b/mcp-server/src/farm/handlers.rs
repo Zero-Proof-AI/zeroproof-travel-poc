@@ -353,6 +353,11 @@ pub async fn handle_checkout(
     state.orders.insert(order_id.clone(), order.clone());
     state.carts.remove(&req.session_id);
 
+    // Persist to SQLite
+    if let Err(e) = db.insert_order(&order) {
+        tracing::error!("[FARM] Failed to persist order {}: {}", order_id, e);
+    }
+
     let order_data = json!({
         "order_id": order.order_id,
         "total": format_dollars(order.total_cents),
@@ -378,6 +383,7 @@ pub async fn handle_checkout(
 /// zpi-zkpay GETs this with X-PAYMENT header after signing.
 pub async fn handle_checkout_verify(
     State(state): State<SharedFarmState>,
+    State(db): State<SharedMerchantDb>,
     Path(order_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
@@ -442,6 +448,16 @@ pub async fn handle_checkout_verify(
         }
         // Clear the cart for this session
         state.carts.remove(&order.session_id);
+    }
+
+    // Persist status to SQLite
+    if let Err(e) = db.update_order_status(
+        &order_id,
+        &OrderStatus::Paid,
+        settlement.tx_hash.as_deref(),
+        settlement.network.as_deref(),
+    ) {
+        tracing::error!("[FARM-X402] Failed to persist paid status for {}: {}", order_id, e);
     }
 
     tracing::info!(
@@ -805,5 +821,79 @@ pub async fn handle_set_product_chains(
     (
         StatusCode::OK,
         Json(json!({ "product_id": product_id, "chains": body.chains })),
+    )
+}
+
+// ── Order Management API ─────────────────────────────────────────
+
+/// GET /api/orders — list all orders (most recent first).
+pub async fn handle_list_orders(
+    State(db): State<SharedMerchantDb>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    match db.list_orders() {
+        Ok(rows) => {
+            let orders: Vec<serde_json::Value> = rows
+                .into_iter()
+                .map(|r| {
+                    let items: serde_json::Value =
+                        serde_json::from_str(&r.items_json).unwrap_or(json!([]));
+                    json!({
+                        "order_id": r.order_id,
+                        "session_id": r.session_id,
+                        "items": items,
+                        "total_cents": r.total_cents,
+                        "total": format!("${:.2}", r.total_cents as f64 / 100.0),
+                        "status": r.status,
+                        "payment_method": r.payment_method,
+                        "tx_hash": r.tx_hash,
+                        "network": r.network,
+                        "created_at": r.created_at,
+                        "updated_at": r.updated_at,
+                    })
+                })
+                .collect();
+            (StatusCode::OK, Json(json!({ "orders": orders })))
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("Failed to load orders: {}", e) })),
+        ),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateOrderStatusRequest {
+    pub status: String,
+}
+
+/// PUT /api/orders/:id/status — update order status (shipped, cancelled).
+pub async fn handle_update_order_status(
+    State(db): State<SharedMerchantDb>,
+    Path(order_id): Path<String>,
+    Json(body): Json<UpdateOrderStatusRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let new_status = match body.status.as_str() {
+        "shipped" => OrderStatus::Shipped,
+        "cancelled" => OrderStatus::Cancelled,
+        "paid" => OrderStatus::Paid,
+        other => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("Invalid status '{}'. Use: shipped, cancelled, paid", other) })),
+            );
+        }
+    };
+
+    if let Err(e) = db.update_order_status(&order_id, &new_status, None, None) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("Failed to update: {}", e) })),
+        );
+    }
+
+    tracing::info!("[FARM] Order {} status → {:?}", order_id, new_status);
+    (
+        StatusCode::OK,
+        Json(json!({ "order_id": order_id, "status": body.status })),
     )
 }

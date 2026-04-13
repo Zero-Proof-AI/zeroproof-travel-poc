@@ -894,6 +894,9 @@ async fn main() -> Result<()> {
         .route("/api/products", get(handlers::handle_api_products))
         .route("/api/products/:id/chains", get(handlers::handle_get_product_chains))
         .route("/api/products/:id/chains", put(handlers::handle_set_product_chains))
+        // Orders API
+        .route("/api/orders", get(handlers::handle_list_orders))
+        .route("/api/orders/:id/status", put(handlers::handle_update_order_status))
         // Admin / Test API
         .route("/api/admin/tamper-mode", post(handlers::handle_tamper_mode))
         .route("/api/admin/tamper-mode", get(handlers::handle_tamper_status))
