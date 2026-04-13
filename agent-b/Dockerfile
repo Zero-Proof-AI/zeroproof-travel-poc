@@ -40,6 +40,9 @@ RUN apt-get update && apt-get install -y \
 # Copy the built binary from builder
 COPY --from=builder /app/target/release/agent-b-mcp-server /app/agent-b-mcp-server
 
+# Copy static files (farm UI)
+COPY --from=builder /app/mcp-server/static /app/static
+
 # Expose the MCP server port
 EXPOSE 3030
 
