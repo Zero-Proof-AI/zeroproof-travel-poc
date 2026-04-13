@@ -16,6 +16,7 @@ COPY agent-b/Cargo.toml agent-b/Cargo.lock ./
 
 # Copy workspace members
 COPY agent-b/pricing-core/ ./pricing-core/
+COPY agent-b/farm-core/ ./farm-core/
 COPY agent-b/mcp-server/ ./mcp-server/
 COPY agent-b/program/ ./program/
 COPY agent-b/server/ ./server/
