@@ -433,6 +433,13 @@ async fn dispatch_farm_tool(
                 Err((_, axum::Json(r))) => r,
             }
         }
+        "pay-with-nevermined" => {
+            let req: handlers::PayWithNeverminedRequest = serde_json::from_value(args_value).ok()?;
+            match handlers::handle_pay_with_nevermined(State(farm_state), Json(req)).await {
+                Ok(axum::Json(r)) => r,
+                Err((_, axum::Json(r))) => r,
+            }
+        }
         "farm-clear-cart" => {
             let req: handlers::ClearCartRequest = serde_json::from_value(args_value).ok()?;
             let axum::Json(r) = handlers::handle_clear_cart(State(farm_state), Json(req)).await;
@@ -883,8 +890,10 @@ async fn main() -> Result<()> {
         .route("/tools/farm-add-to-cart", post(handlers::handle_add_to_cart))
         .route("/tools/farm-view-cart", post(handlers::handle_view_cart))
         .route("/tools/farm-checkout", post(handlers::handle_checkout))
+        .route("/tools/pay-with-nevermined", post(handlers::handle_pay_with_nevermined))
         .route("/tools/farm-clear-cart", post(handlers::handle_clear_cart))
         .route("/farm/checkout/:order_id", get(handlers::handle_checkout_verify))
+        .route("/farm/checkout-nevermined/:order_id", get(handlers::handle_checkout_nevermined))
         .route("/mcp", post(handle_mcp))
         // Merchant API
         .route("/api/merchant/status", get(handlers::handle_merchant_status))
@@ -940,11 +949,46 @@ async fn main() -> Result<()> {
     println!("  POST /tools/farm-add-to-cart    — Add to cart");
     println!("  POST /tools/farm-view-cart      — View cart");
     println!("  POST /tools/farm-checkout       — Checkout (x402)");
+    println!("  POST /tools/pay-with-nevermined — Nevermined card pay (2-phase proof flow)");
     println!("  GET  /farm/checkout/:order_id   — x402 payment verify");
+    println!("  GET  /farm/checkout-nevermined/:order_id — Nevermined payment verify");
     println!("  POST /mcp                       — MCP protocol endpoint\n");
 
-    
-    
+    // ── Nevermined config summary ─────────────────────────────────────
+    let nvm_env = std::env::var("NVM_ENVIRONMENT").unwrap_or_else(|_| "sandbox (default)".to_string());
+    let nvm_verify_url = match std::env::var("NEVERMINED_VERIFY_URL") {
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => match nvm_env.to_lowercase().as_str() {
+            "live" => "https://facilitator.nevermined.app/api/v1/x402/verify".to_string(),
+            _ => "https://facilitator.sandbox.nevermined.app/api/v1/x402/verify".to_string(),
+        },
+    };
+    let nvm_token_url = std::env::var("NEVERMINED_TOKEN_URL")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "https://pay.nevermined.app/api/access-token/from-nvm-key".to_string());
+    let nvm_scheme = std::env::var("NEVERMINED_SCHEME").unwrap_or_else(|_| "nvm:erc4337 (default)".to_string());
+    let nvm_network = std::env::var("NEVERMINED_NETWORK").unwrap_or_else(|_| "auto".to_string());
+    let stop_flag = std::env::var("NEVERMINED_STOP_AFTER_VERIFY")
+        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+        .unwrap_or(false);
+    let nvm_key_hint = match std::env::var("NVM_API_KEY") {
+        Ok(k) if !k.is_empty() => {
+            let prefix = k.split(':').next().unwrap_or("??");
+            format!("set (prefix={})", prefix)
+        }
+        _ => "NOT SET ⚠️".to_string(),
+    };
+    println!("  Nevermined config:");
+    println!("    NVM_ENVIRONMENT            = {}", nvm_env);
+    println!("    Token mint URL             = {}", nvm_token_url);
+    println!("    Facilitator verify URL     = {}", nvm_verify_url);
+    println!("    NEVERMINED_SCHEME          = {}", nvm_scheme);
+    println!("    NEVERMINED_NETWORK         = {}", nvm_network);
+    println!("    NEVERMINED_STOP_AFTER_VERIFY = {}", stop_flag);
+    println!("    NVM_API_KEY                = {}", nvm_key_hint);
+    println!();
+
     
 
     axum::serve(listener, app).await?;

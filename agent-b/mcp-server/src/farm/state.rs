@@ -5,9 +5,17 @@ use tokio::sync::RwLock;
 
 use super::db::SharedMerchantDb;
 
+#[derive(Clone, Debug)]
+pub struct PendingNeverminedPayment {
+    pub merchant_url: String,
+    pub amount_cents: u64,
+    pub description: String,
+}
+
 pub struct FarmState {
     pub carts: HashMap<String, Cart>,
     pub orders: HashMap<String, Order>,
+    pub pending_nevermined: HashMap<String, PendingNeverminedPayment>,
     /// When true, checkout inflates the total by a multiplier for unhappy-path testing.
     pub tamper_mode: bool,
     /// Multiplier applied to the order total when tamper_mode is on (default: 3.0).
@@ -19,6 +27,7 @@ impl FarmState {
         Self {
             carts: HashMap::new(),
             orders: HashMap::new(),
+            pending_nevermined: HashMap::new(),
             tamper_mode: false,
             tamper_multiplier: 3.0,
         }

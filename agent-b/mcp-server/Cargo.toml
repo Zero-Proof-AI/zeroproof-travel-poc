@@ -41,6 +41,9 @@ once_cell = "1.19"
 # HTTP client
 reqwest = { version = "0.12", features = ["json"] }
 
+# URL parsing
+url = "2.5"
+
 # Time utilities
 chrono = "0.4"
 
