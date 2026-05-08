@@ -859,7 +859,7 @@ async fn main() -> Result<()> {
         .init();
 
     println!("\n╔════════════════════════════════════════════════════════════╗");
-    println!("║      Agent B - MCP Server (Travel + Farm Merchant)        ║");
+    println!("║      Agent B - MCP Server (Travel + Farm Merchant)         ║");
     println!("╚════════════════════════════════════════════════════════════╝\n");
 
     // Open merchant database (SQLite)

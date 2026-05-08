@@ -71,6 +71,11 @@ spec:
                 secretKeyRef:
                   name: agent-b-mcps
                   key: PRIVATE_KEY
+            - name: NVM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: agent-b-mcps
+                  key: NVM_API_KEY
             - name: ZPI_ZKPAY_URL
               valueFrom:
                 configMapKeyRef:
@@ -81,6 +86,86 @@ spec:
                 configMapKeyRef:
                   name: agent-b-mcps-config
                   key: MERCHANT_WALLET_ADDRESS
+            - name: NVM_ENVIRONMENT
+              valueFrom:
+                configMapKeyRef:
+                  name: agent-b-mcps-config
+                  key: NVM_ENVIRONMENT
+            - name: NEVERMINED_TOKEN_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: agent-b-mcps-config
+                  key: NEVERMINED_TOKEN_URL
+            - name: NEVERMINED_VERIFY_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: agent-b-mcps-config
+                  key: NEVERMINED_VERIFY_URL
+            - name: NEVERMINED_SETTLE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: agent-b-mcps-config
+                  key: NEVERMINED_SETTLE_URL
+            - name: NEVERMINED_VERIFY_SCHEMA
+              valueFrom:
+                configMapKeyRef:
+                  name: agent-b-mcps-config
+                  key: NEVERMINED_VERIFY_SCHEMA
+            - name: NEVERMINED_SCHEME
+              valueFrom:
+                configMapKeyRef:
+                  name: agent-b-mcps-config
+                  key: NEVERMINED_SCHEME
+            - name: NEVERMINED_NETWORK
+              valueFrom:
+                configMapKeyRef:
+                  name: agent-b-mcps-config
+                  key: NEVERMINED_NETWORK
+            - name: NEVERMINED_DANGER_ACCEPT_INVALID_CERTS
+              valueFrom:
+                configMapKeyRef:
+                  name: agent-b-mcps-config
+                  key: NEVERMINED_DANGER_ACCEPT_INVALID_CERTS
+            - name: NEVERMINED_HTTP_TRACE
+              valueFrom:
+                configMapKeyRef:
+                  name: agent-b-mcps-config
+                  key: NEVERMINED_HTTP_TRACE
+            - name: NEVERMINED_MANDATE_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: agent-b-mcps-config
+                  key: NEVERMINED_MANDATE_ID
+            - name: NEVERMINED_PLAN_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: agent-b-mcps-config
+                  key: NEVERMINED_PLAN_ID
+            - name: NEVERMINED_AGENT_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: agent-b-mcps-config
+                  key: NEVERMINED_AGENT_ID
+            - name: NEVERMINED_PAY_TO
+              valueFrom:
+                configMapKeyRef:
+                  name: agent-b-mcps-config
+                  key: NEVERMINED_PAY_TO
+            - name: NEVERMINED_USE_TOKEN_EXCHANGE
+              valueFrom:
+                configMapKeyRef:
+                  name: agent-b-mcps-config
+                  key: NEVERMINED_USE_TOKEN_EXCHANGE
+            - name: NEVERMINED_VERIFY_LEGACY_RETRY
+              valueFrom:
+                configMapKeyRef:
+                  name: agent-b-mcps-config
+                  key: NEVERMINED_VERIFY_LEGACY_RETRY
+            - name: SERVER_BASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: agent-b-mcps-config
+                  key: SERVER_BASE_URL
           livenessProbe:
             httpGet:
               path: /health
