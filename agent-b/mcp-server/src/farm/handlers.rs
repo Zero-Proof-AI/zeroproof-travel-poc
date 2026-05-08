@@ -73,6 +73,72 @@ pub struct PayWithNeverminedRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct VgsBillingAddress {
+    pub line1: String,
+    pub city: String,
+    pub state: String,
+    #[serde(rename = "postalCode")]
+    pub postal_code: String,
+    pub country: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct VgsBrowserData {
+    #[serde(rename = "acceptHeader")]
+    pub accept_header: String,
+    #[serde(rename = "javaEnabled")]
+    pub java_enabled: bool,
+    #[serde(rename = "javascriptEnabled")]
+    pub javascript_enabled: bool,
+    pub language: String,
+    #[serde(rename = "colorDepth")]
+    pub color_depth: u32,
+    #[serde(rename = "screenHeight")]
+    pub screen_height: u32,
+    #[serde(rename = "screenWidth")]
+    pub screen_width: u32,
+    #[serde(rename = "timeZone")]
+    pub time_zone: i32,
+    #[serde(rename = "userAgent")]
+    pub user_agent: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PayWithVgsCreditCardRequest {
+    pub order_id: String,
+    #[serde(default)]
+    pub confirm_saved_profile: Option<bool>,
+    #[serde(default)]
+    pub card_holder_name: Option<String>,
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub mobile_cc: Option<String>,
+    #[serde(default)]
+    pub mobile_subscriber: Option<String>,
+    #[serde(default)]
+    pub billing: Option<VgsBillingAddress>,
+    #[serde(default)]
+    pub browser: Option<VgsBrowserData>,
+    #[serde(default)]
+    pub external_id: Option<String>,
+    #[serde(default)]
+    pub zpi_proof: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ConfirmVgsCreditCardPaymentRequest {
+    pub order_id: String,
+    pub payment_confirmed: bool,
+    #[serde(default)]
+    pub transaction_ref: Option<String>,
+    #[serde(default)]
+    pub external_id: Option<String>,
+    #[serde(default)]
+    pub zpi_response: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct TamperModeRequest {
     pub enabled: bool,
     pub multiplier: Option<f64>,
@@ -309,8 +375,10 @@ async fn mint_nevermined_access_token(
     let auth_api_key = api_key;
 
     let mut last_error: Option<String> = None;
+    let mut attempts_made: usize = 0;
 
     for attempt in 1..=max_attempts {
+        attempts_made = attempt;
         let body = request_body.clone();
 
         if http_trace {
@@ -425,7 +493,7 @@ async fn mint_nevermined_access_token(
 
     Err(format!(
         "Nevermined token endpoint unavailable after {} attempt(s). {}. You can retry shortly or switch to x402_crypto.",
-        max_attempts,
+        attempts_made,
         last_error.unwrap_or_else(|| "unknown error".to_string())
     ))
 }
@@ -1031,6 +1099,194 @@ pub async fn handle_pay_with_nevermined(
     }))))
 }
 
+pub async fn handle_pay_with_vgs_credit_card(
+    State(state): State<SharedFarmState>,
+    Json(req): Json<PayWithVgsCreditCardRequest>,
+) -> Result<Json<FarmToolResponse>, (StatusCode, Json<FarmToolResponse>)> {
+    let zpi_proof = req.zpi_proof.clone().unwrap_or_default();
+    let external_id = req
+        .external_id
+        .clone()
+        .unwrap_or_else(|| format!("vgs-ext-{}", req.order_id));
+
+    if zpi_proof.trim().is_empty() {
+        return Ok(Json(FarmToolResponse::ok(json!({
+            "status": "NEEDS_INTENT_PROOF",
+            "order_id": req.order_id,
+            "external_id": external_id,
+            "intent_type": "spend",
+            "payment_processor": "vgs_card",
+            "instructions": "Call chp_save, then zpi_generate_zkp with this external_id and intent_type='spend', then call pay-with-vgs-credit-card again with zpi_proof."
+        }))));
+    }
+
+    if zpi_proof.trim().len() < 16 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(FarmToolResponse::err(
+                400,
+                "zpi_proof looks invalid (too short)".to_string(),
+            )),
+        ));
+    }
+
+    let order = {
+        let state = state.read().await;
+        state.orders.get(&req.order_id).cloned()
+    }
+    .ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(FarmToolResponse::err(
+                404,
+                format!("Order '{}' not found", req.order_id),
+            )),
+        )
+    })?;
+
+    if order.status == OrderStatus::Paid {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(FarmToolResponse::err(409, "Order already paid".into())),
+        ));
+    }
+
+    let merchant_id = std::env::var("ZPI_VGS_MERCHANT_ID")
+        .unwrap_or_else(|_| "test-merchant-p2".to_string());
+
+    let mut body_obj = serde_json::Map::new();
+    body_obj.insert("amount".to_string(), json!(order.total_cents));
+    body_obj.insert("currency".to_string(), json!("840"));
+    body_obj.insert("merchant_id".to_string(), json!(merchant_id));
+    body_obj.insert("external_id".to_string(), json!(external_id));
+    if let Some(v) = req.confirm_saved_profile {
+        body_obj.insert("confirm_profile".to_string(), json!(v));
+    }
+
+    if let Some(v) = req.card_holder_name.as_ref().filter(|s| !s.trim().is_empty()) {
+        body_obj.insert("card_holder_name".to_string(), json!(v));
+    }
+    if let Some(v) = req.email.as_ref().filter(|s| !s.trim().is_empty()) {
+        body_obj.insert("email".to_string(), json!(v));
+    }
+    if let Some(v) = req.mobile_cc.as_ref().filter(|s| !s.trim().is_empty()) {
+        body_obj.insert("mobile_cc".to_string(), json!(v));
+    }
+    if let Some(v) = req.mobile_subscriber.as_ref().filter(|s| !s.trim().is_empty()) {
+        body_obj.insert("mobile_subscriber".to_string(), json!(v));
+    }
+    if let Some(billing) = req.billing.as_ref() {
+        body_obj.insert(
+            "billing".to_string(),
+            json!({
+                "line1": billing.line1,
+                "city": billing.city,
+                "state": billing.state,
+                "postalCode": billing.postal_code,
+                "country": billing.country,
+            }),
+        );
+    }
+    if let Some(browser) = req.browser.as_ref() {
+        body_obj.insert(
+            "browser".to_string(),
+            json!({
+                "acceptHeader": browser.accept_header,
+                "javaEnabled": browser.java_enabled,
+                "javascriptEnabled": browser.javascript_enabled,
+                "language": browser.language,
+                "colorDepth": browser.color_depth,
+                "screenHeight": browser.screen_height,
+                "screenWidth": browser.screen_width,
+                "timeZone": browser.time_zone,
+                "userAgent": browser.user_agent,
+            }),
+        );
+    }
+
+    let body = serde_json::Value::Object(body_obj);
+
+    Ok(Json(FarmToolResponse::ok(json!({
+        "status": "READY_FOR_ZPI_PAYMENT",
+        "order_id": req.order_id,
+        "payment_processor": "vgs_card",
+        "external_id": external_id,
+        "zpi_tool": "pay-with-vgs-credit-card",
+        "zpi_arguments": body,
+        "next_tool": "confirm-vgs-credit-card-payment",
+        "instructions": "Now call zpi-zkpay MCP tool pay-with-vgs-credit-card with zpi_arguments exactly. If that succeeds, call confirm-vgs-credit-card-payment with order_id, payment_confirmed=true, and zpi_response from zpi-zkpay.",
+    }))))
+}
+
+pub async fn handle_confirm_vgs_credit_card_payment(
+    State(state): State<SharedFarmState>,
+    State(db): State<SharedMerchantDb>,
+    Json(req): Json<ConfirmVgsCreditCardPaymentRequest>,
+) -> Result<Json<FarmToolResponse>, (StatusCode, Json<FarmToolResponse>)> {
+    if !req.payment_confirmed {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(FarmToolResponse::err(
+                400,
+                "payment_confirmed must be true after successful zpi-zkpay payment".to_string(),
+            )),
+        ));
+    }
+
+    let order = {
+        let state = state.read().await;
+        state.orders.get(&req.order_id).cloned()
+    }
+    .ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(FarmToolResponse::err(
+                404,
+                format!("Order '{}' not found", req.order_id),
+            )),
+        )
+    })?;
+
+    if order.status == OrderStatus::Paid {
+        return Ok(Json(FarmToolResponse::ok(json!({
+            "status": "PAID",
+            "order_id": req.order_id,
+            "payment_processor": "vgs_card",
+            "transaction_ref": req
+                .transaction_ref
+                .or(req.external_id)
+                .unwrap_or_else(|| format!("vgs-ext-{}", req.order_id)),
+            "already_paid": true,
+        }))));
+    }
+
+    let tx_ref = req
+        .transaction_ref
+        .or_else(|| req.zpi_response.as_ref().and_then(|v| v.get("external_id").and_then(|x| x.as_str()).map(|s| s.to_string())))
+        .or(req.external_id)
+        .unwrap_or_else(|| format!("vgs-ext-{}", req.order_id));
+
+    {
+        let mut state = state.write().await;
+        if let Some(existing) = state.orders.get_mut(&req.order_id) {
+            existing.status = OrderStatus::Paid;
+        }
+        state.carts.remove(&order.session_id);
+    }
+
+    if let Err(e) = db.update_order_status(&req.order_id, &OrderStatus::Paid, Some(&tx_ref), Some("vgs-card")) {
+        tracing::error!("[FARM-VGS] Failed to persist paid status for {}: {}", req.order_id, e);
+    }
+
+    Ok(Json(FarmToolResponse::ok(json!({
+        "status": "PAID",
+        "order_id": req.order_id,
+        "payment_processor": "vgs_card",
+        "transaction_ref": tx_ref,
+        "zpi_response": req.zpi_response,
+    }))))
+}
+
 // ── Handlers ─────────────────────────────────────────────────────
 
 pub async fn handle_list_products(
@@ -1186,13 +1442,16 @@ pub async fn handle_checkout(
 ) -> Result<(StatusCode, Json<FarmToolResponse>), (StatusCode, Json<FarmToolResponse>)> {
     tracing::info!("[FARM] checkout session={} method={}", req.session_id, req.payment_method);
 
-    if req.payment_method != "x402_crypto" && req.payment_method != "nevermined_card" {
+    if req.payment_method != "x402_crypto"
+        && req.payment_method != "nevermined_card"
+        && req.payment_method != "vgs_card"
+    {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(FarmToolResponse::err(
                 400,
                 format!(
-                    "Unsupported payment method '{}'. Supported methods: 'x402_crypto', 'nevermined_card'.",
+                    "Unsupported payment method '{}'. Supported methods: 'x402_crypto', 'nevermined_card', 'vgs_card'.",
                     req.payment_method
                 ),
             )),
@@ -1283,6 +1542,32 @@ pub async fn handle_checkout(
                     "description": format!("Farm order {}", order.order_id)
                 },
                 "instructions": "Call chp_save, then zpi_generate_zkp with this external_id and intent_type='spend'. Then call pay-with-nevermined with external_id + zpi_proof."
+            }))),
+        ));
+    }
+
+    if req.payment_method == "vgs_card" {
+        // Store order and clear cart
+        state.orders.insert(order_id.clone(), order.clone());
+        state.carts.remove(&req.session_id);
+
+        if let Err(e) = db.insert_order(&order) {
+            tracing::error!("[FARM] Failed to persist VGS order {}: {}", order_id, e);
+        }
+
+        let external_id = format!("vgs-ext-{}", order_id);
+
+        return Ok((
+            StatusCode::OK,
+            Json(FarmToolResponse::ok(json!({
+                "status": "NEEDS_VGS_PAYMENT",
+                "payment_method": "vgs_card",
+                "order_id": order_id,
+                "external_id": external_id,
+                "amount": format_dollars(order.total_cents),
+                "amount_cents": order.total_cents,
+                "currency": "USD",
+                "instructions": "Call pay-with-vgs-credit-card with order_id and card/payer details. First call without zpi_proof returns NEEDS_INTENT_PROOF.",
             }))),
         ));
     }
@@ -1678,7 +1963,7 @@ pub fn farm_tool_definitions() -> Vec<serde_json::Value> {
         }),
         json!({
             "name": "farm-checkout",
-            "description": "Checkout the cart. Supports x402 crypto or Nevermined card demo flow. x402 returns HTTP 402 payment challenge. nevermined_card returns NEEDS_INTENT_PROOF with external_id.",
+            "description": "Checkout the cart. Supports x402 crypto, Nevermined card demo flow, or VGS card flow. x402 returns HTTP 402 payment challenge. card flows return a proof step and follow-up tool call.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1688,12 +1973,99 @@ pub fn farm_tool_definitions() -> Vec<serde_json::Value> {
                     },
                     "payment_method": {
                         "type": "string",
-                        "enum": ["x402_crypto", "nevermined_card"],
-                        "description": "Payment method: x402_crypto or nevermined_card.",
+                        "enum": ["x402_crypto", "nevermined_card", "vgs_card"],
+                        "description": "Payment method: x402_crypto, nevermined_card, or vgs_card.",
                         "default": "x402_crypto"
                     }
                 },
                 "required": ["session_id"]
+            }
+        }),
+        json!({
+            "name": "pay-with-vgs-credit-card",
+            "description": "Prepare VGS checkout after proof validation. This tool does NOT charge directly. It returns zpi-zkpay MCP arguments for pay-with-vgs-credit-card. After zpi-zkpay payment succeeds, call confirm-vgs-credit-card-payment to finalize order status.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "order_id": {
+                        "type": "string",
+                        "description": "Order ID returned from farm-checkout with payment_method='vgs_card'."
+                    },
+                    "confirm_saved_profile": {
+                        "type": "boolean",
+                        "description": "Set true after the user confirms masked saved checkout profile details."
+                    },
+                    "card_holder_name": {
+                        "type": "string",
+                        "description": "Name on card"
+                    },
+                    "email": {
+                        "type": "string",
+                        "description": "Payer email"
+                    },
+                    "mobile_cc": {
+                        "type": "string",
+                        "description": "Mobile country code, e.g. 1"
+                    },
+                    "mobile_subscriber": {
+                        "type": "string",
+                        "description": "Mobile number without country code"
+                    },
+                    "billing": {
+                        "type": "object",
+                        "properties": {
+                            "line1": { "type": "string" },
+                            "city": { "type": "string" },
+                            "state": { "type": "string" },
+                            "postalCode": { "type": "string" },
+                            "country": { "type": "string" }
+                        },
+                        "required": ["line1", "city", "state", "postalCode", "country"]
+                    },
+                    "browser": {
+                        "type": "object",
+                        "description": "Optional browser data for 3DS signals"
+                    },
+                    "external_id": {
+                        "type": "string",
+                        "description": "Optional idempotency external ID"
+                    },
+                    "zpi_proof": {
+                        "type": "string",
+                        "description": "ZPI proof from zpi_generate_zkp"
+                    }
+                },
+                "required": ["order_id"]
+            }
+        }),
+        json!({
+            "name": "confirm-vgs-credit-card-payment",
+            "description": "Finalize farm order after zpi-zkpay pay-with-vgs-credit-card succeeds. Marks the order as PAID and stores transaction reference.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "order_id": {
+                        "type": "string",
+                        "description": "Order ID returned from farm-checkout with payment_method='vgs_card'."
+                    },
+                    "payment_confirmed": {
+                        "type": "boolean",
+                        "description": "Must be true only after zpi-zkpay payment succeeded."
+                    },
+                    "transaction_ref": {
+                        "type": "string",
+                        "description": "Optional transaction reference to persist with order status."
+                    },
+                    "external_id": {
+                        "type": "string",
+                        "description": "Optional external ID used for proof/idempotency."
+                    },
+                    "zpi_response": {
+                        "type": "object",
+                        "description": "Optional zpi-zkpay pay-with-vgs-credit-card response payload."
+                    }
+                },
+                "required": ["order_id", "payment_confirmed"]
             }
         }),
         json!({
@@ -1759,10 +2131,18 @@ FARM MERCHANT INSTRUCTIONS:
 8. For Nevermined flow: call pay-with-nevermined with merchant_url/amount/description.
     If it returns NEEDS_INTENT_PROOF, run chp_save + zpi_generate_zkp (intent_type='spend')
     and call pay-with-nevermined again with external_id + zpi_proof.
-9. If pay-with-nevermined returns PROOF_MISMATCH, STOP and ask the user to confirm intent
+9. To purchase with VGS card flow, call farm-checkout with payment_method='vgs_card', then call
+   pay-with-vgs-credit-card with the returned order_id and payer details.
+   If it returns NEEDS_INTENT_PROOF, run chp_save + zpi_generate_zkp (intent_type='spend')
+   and call pay-with-vgs-credit-card again with external_id + zpi_proof.
+10. If pay-with-vgs-credit-card returns READY_FOR_ZPI_PAYMENT, call zpi-zkpay MCP tool
+    pay-with-vgs-credit-card using zpi_arguments exactly as returned.
+11. After zpi-zkpay payment succeeds, call confirm-vgs-credit-card-payment with
+    order_id + payment_confirmed=true (+ zpi_response when available).
+12. If pay-with-nevermined returns PROOF_MISMATCH, STOP and ask the user to confirm intent
     before generating a new proof.
-10. Available categories: dairy, meat, poultry, produce.
-11. All prices are in USD.
+13. Available categories: dairy, meat, poultry, produce.
+14. All prices are in USD.
 "#;
 
 // ── Merchant API Handlers ────────────────────────────────────────────────────
