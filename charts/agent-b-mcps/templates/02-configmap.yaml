@@ -26,6 +26,7 @@ data:
   NEVERMINED_PAY_TO: agent-b-farm
   NEVERMINED_USE_TOKEN_EXCHANGE: "true"
   NEVERMINED_VERIFY_LEGACY_RETRY: "false"
+  NEVERMINED_MERCHANT_ALLOWLIST: "localhost,127.0.0.1,dev.agentb.zeroproofai.com"
   SERVER_BASE_URL: https://dev.agentb.zeroproofai.com
   NEVERMINED_DANGER_ACCEPT_INVALID_CERTS: "false"
   NEVERMINED_HTTP_TRACE: "true"

@@ -161,6 +161,11 @@ spec:
                 configMapKeyRef:
                   name: agent-b-mcps-config
                   key: NEVERMINED_VERIFY_LEGACY_RETRY
+            - name: NEVERMINED_MERCHANT_ALLOWLIST
+              valueFrom:
+                configMapKeyRef:
+                  name: agent-b-mcps-config
+                  key: NEVERMINED_MERCHANT_ALLOWLIST
             - name: SERVER_BASE_URL
               valueFrom:
                 configMapKeyRef:
