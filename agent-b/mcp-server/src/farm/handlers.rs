@@ -846,7 +846,12 @@ async fn settle_nevermined_token(
         );
     }
 
-    tracing::debug!("Nevermined settle request to {}: scheme={} network={} planId={} creditsUsed={}", settle_url, scheme, network, plan_id, credits_used);
+    tracing::info!(
+        "[FARM-NVM][SETTLE][BODY] url={} scheme={} network={} planId={} creditsUsed={} token={} paymentRequired={}",
+        settle_url, scheme, network, plan_id, credits_used,
+        redact_secret(token),
+        serde_json::to_string(&payment_required).unwrap_or_default()
+    );
     let resp = client
         .post(&settle_url)
         .header("Authorization", format!("Bearer {}", api_key))
@@ -926,7 +931,7 @@ pub async fn handle_pay_with_nevermined(
                 "description": req.description,
                 "payment_processor": "nevermined"
             },
-            "instructions": "Call chp_save, then zpi_generate_zkp with this external_id and intent_type='spend', then call pay-with-nevermined again with zpi_proof."
+            "instructions": "Call chp_save, then zpi_prove_intent with this external_id and intent_type='spend', then call pay-with-nevermined again with zpi_proof."
         }))));
     }
 
@@ -1103,6 +1108,14 @@ pub async fn handle_pay_with_vgs_credit_card(
     State(state): State<SharedFarmState>,
     Json(req): Json<PayWithVgsCreditCardRequest>,
 ) -> Result<Json<FarmToolResponse>, (StatusCode, Json<FarmToolResponse>)> {
+    tracing::info!(
+        "[FARM-VGS] pay-with-vgs-credit-card called: order_id={}, external_id={}, has_zpi_proof={}, confirm_saved_profile={}",
+        req.order_id,
+        req.external_id.as_deref().unwrap_or("<auto>"),
+        req.zpi_proof.as_ref().map(|p| !p.trim().is_empty()).unwrap_or(false),
+        req.confirm_saved_profile.unwrap_or(false),
+    );
+
     let zpi_proof = req.zpi_proof.clone().unwrap_or_default();
     let external_id = req
         .external_id
@@ -1110,13 +1123,18 @@ pub async fn handle_pay_with_vgs_credit_card(
         .unwrap_or_else(|| format!("vgs-ext-{}", req.order_id));
 
     if zpi_proof.trim().is_empty() {
+        tracing::info!(
+            "[FARM-VGS] pay-with-vgs-credit-card returning NEEDS_INTENT_PROOF: order_id={}, external_id={}",
+            req.order_id,
+            external_id
+        );
         return Ok(Json(FarmToolResponse::ok(json!({
             "status": "NEEDS_INTENT_PROOF",
             "order_id": req.order_id,
             "external_id": external_id,
             "intent_type": "spend",
             "payment_processor": "vgs_card",
-            "instructions": "Call chp_save, then zpi_generate_zkp with this external_id and intent_type='spend', then call pay-with-vgs-credit-card again with zpi_proof."
+            "instructions": "Call chp_save, then zpi_prove_intent with this external_id and intent_type='spend', then call pay-with-vgs-credit-card again with zpi_proof."
         }))));
     }
 
@@ -1206,6 +1224,14 @@ pub async fn handle_pay_with_vgs_credit_card(
 
     let body = serde_json::Value::Object(body_obj);
 
+    tracing::info!(
+        "[FARM-VGS] pay-with-vgs-credit-card returning READY_FOR_ZPI_PAYMENT: order_id={}, external_id={}, merchant_id={}, amount_cents={}",
+        req.order_id,
+        external_id,
+        merchant_id,
+        order.total_cents,
+    );
+
     Ok(Json(FarmToolResponse::ok(json!({
         "status": "READY_FOR_ZPI_PAYMENT",
         "order_id": req.order_id,
@@ -1223,6 +1249,14 @@ pub async fn handle_confirm_vgs_credit_card_payment(
     State(db): State<SharedMerchantDb>,
     Json(req): Json<ConfirmVgsCreditCardPaymentRequest>,
 ) -> Result<Json<FarmToolResponse>, (StatusCode, Json<FarmToolResponse>)> {
+    tracing::info!(
+        "[FARM-VGS] confirm-vgs-credit-card-payment called: order_id={}, payment_confirmed={}, external_id={}, transaction_ref={}",
+        req.order_id,
+        req.payment_confirmed,
+        req.external_id.as_deref().unwrap_or("<none>"),
+        req.transaction_ref.as_deref().unwrap_or("<none>"),
+    );
+
     if !req.payment_confirmed {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -1248,6 +1282,10 @@ pub async fn handle_confirm_vgs_credit_card_payment(
     })?;
 
     if order.status == OrderStatus::Paid {
+        tracing::info!(
+            "[FARM-VGS] confirm-vgs-credit-card-payment idempotent: order already paid, order_id={}",
+            req.order_id,
+        );
         return Ok(Json(FarmToolResponse::ok(json!({
             "status": "PAID",
             "order_id": req.order_id,
@@ -1277,6 +1315,12 @@ pub async fn handle_confirm_vgs_credit_card_payment(
     if let Err(e) = db.update_order_status(&req.order_id, &OrderStatus::Paid, Some(&tx_ref), Some("vgs-card")) {
         tracing::error!("[FARM-VGS] Failed to persist paid status for {}: {}", req.order_id, e);
     }
+
+    tracing::info!(
+        "[FARM-VGS] confirm-vgs-credit-card-payment finalized PAID: order_id={}, transaction_ref={}",
+        req.order_id,
+        tx_ref,
+    );
 
     Ok(Json(FarmToolResponse::ok(json!({
         "status": "PAID",
@@ -1541,7 +1585,7 @@ pub async fn handle_checkout(
                     "currency": "USD",
                     "description": format!("Farm order {}", order.order_id)
                 },
-                "instructions": "Call chp_save, then zpi_generate_zkp with this external_id and intent_type='spend'. Then call pay-with-nevermined with external_id + zpi_proof."
+                "instructions": "Call chp_save, then zpi_prove_intent with this external_id and intent_type='spend'. Then call pay-with-nevermined with external_id + zpi_proof."
             }))),
         ));
     }
@@ -1560,14 +1604,15 @@ pub async fn handle_checkout(
         return Ok((
             StatusCode::OK,
             Json(FarmToolResponse::ok(json!({
-                "status": "NEEDS_VGS_PAYMENT",
+                "status": "NEEDS_INTENT_PROOF",
                 "payment_method": "vgs_card",
                 "order_id": order_id,
                 "external_id": external_id,
+                "intent_type": "spend",
                 "amount": format_dollars(order.total_cents),
                 "amount_cents": order.total_cents,
                 "currency": "USD",
-                "instructions": "Call pay-with-vgs-credit-card with order_id and card/payer details. First call without zpi_proof returns NEEDS_INTENT_PROOF.",
+                "instructions": "Call chp_save, then zpi_prove_intent with this external_id and intent_type='spend'. Then call pay-with-vgs-credit-card with order_id + external_id + zpi_proof.",
             }))),
         ));
     }
@@ -2032,7 +2077,7 @@ pub fn farm_tool_definitions() -> Vec<serde_json::Value> {
                     },
                     "zpi_proof": {
                         "type": "string",
-                        "description": "ZPI proof from zpi_generate_zkp"
+                        "description": "ZPI proof from zpi_prove_intent"
                     }
                 },
                 "required": ["order_id"]
@@ -2092,7 +2137,7 @@ pub fn farm_tool_definitions() -> Vec<serde_json::Value> {
                     },
                     "zpi_proof": {
                         "type": "string",
-                        "description": "ZPI proof blob/string from zpi_generate_zkp"
+                        "description": "ZPI proof blob/string from zpi_prove_intent"
                     }
                 },
                 "required": ["merchant_url", "amount", "description"]
@@ -2125,16 +2170,16 @@ FARM MERCHANT INSTRUCTIONS:
 5. For x402 checkout (402 response): use x402-select-chain if needed, then x402-pay.
 6. x402-pay first returns NEEDS_INTENT_PROOF:
     a. call chp_save
-    b. call zpi_generate_zkp with external_id from the response and intent_type='spend'
+    b. call zpi_prove_intent with external_id from the response and intent_type='spend'
     c. call x402-pay again with zpi_proof
 7. To purchase with Nevermined card demo flow, call farm-checkout with payment_method='nevermined_card'.
 8. For Nevermined flow: call pay-with-nevermined with merchant_url/amount/description.
-    If it returns NEEDS_INTENT_PROOF, run chp_save + zpi_generate_zkp (intent_type='spend')
+    If it returns NEEDS_INTENT_PROOF, run chp_save + zpi_prove_intent (intent_type='spend')
     and call pay-with-nevermined again with external_id + zpi_proof.
-9. To purchase with VGS card flow, call farm-checkout with payment_method='vgs_card', then call
-   pay-with-vgs-credit-card with the returned order_id and payer details.
-   If it returns NEEDS_INTENT_PROOF, run chp_save + zpi_generate_zkp (intent_type='spend')
-   and call pay-with-vgs-credit-card again with external_id + zpi_proof.
+9. To purchase with VGS card flow, call farm-checkout with payment_method='vgs_card'.
+    It returns NEEDS_INTENT_PROOF immediately.
+    Run chp_save + zpi_prove_intent (intent_type='spend'), then call
+    pay-with-vgs-credit-card with order_id + external_id + zpi_proof.
 10. If pay-with-vgs-credit-card returns READY_FOR_ZPI_PAYMENT, call zpi-zkpay MCP tool
     pay-with-vgs-credit-card using zpi_arguments exactly as returned.
 11. After zpi-zkpay payment succeeds, call confirm-vgs-credit-card-payment with

@@ -13,7 +13,7 @@ use axum::{
     Router,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Map, Value};
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 
@@ -109,6 +109,45 @@ fn tool_error(error: String) -> ToolResponse<()> {
         success: false,
         data: None,
         error: Some(error),
+    }
+}
+
+fn is_sensitive_key(key: &str) -> bool {
+    matches!(
+        key,
+        "card_number"
+            | "cvv"
+            | "cvc"
+            | "pan"
+            | "dpan"
+            | "cryptogram"
+            | "charge_bundle"
+            | "authorization"
+            | "token"
+            | "access_token"
+            | "refresh_token"
+            | "id_token"
+            | "password"
+            | "secret"
+            | "private_key"
+    )
+}
+
+fn redact_value(value: &Value) -> Value {
+    match value {
+        Value::Object(obj) => {
+            let mut out = Map::new();
+            for (k, v) in obj {
+                if is_sensitive_key(k.as_str()) {
+                    out.insert(k.clone(), Value::String("[REDACTED]".to_string()));
+                } else {
+                    out.insert(k.clone(), redact_value(v));
+                }
+            }
+            Value::Object(out)
+        }
+        Value::Array(items) => Value::Array(items.iter().map(redact_value).collect()),
+        _ => value.clone(),
     }
 }
 
@@ -472,7 +511,30 @@ async fn handle_mcp(
     State(merchant_db): State<farm::db::SharedMerchantDb>,
     Json(req): Json<McpRequest>,
 ) -> Result<(StatusCode, Json<McpResponse>), (StatusCode, Json<McpResponse>)> {
-    tracing::info!("[MCP] Received request: method={}, id={:?}", req.method, req.id);
+    if req.method == "tools/call" {
+        let tool_name = req
+            .params
+            .as_ref()
+            .and_then(|p| p.get("name"))
+            .and_then(|n| n.as_str())
+            .unwrap_or("<missing>");
+        let redacted_args = req
+            .params
+            .as_ref()
+            .and_then(|p| p.get("arguments"))
+            .map(redact_value)
+            .unwrap_or(Value::Null);
+
+        tracing::info!(
+            "[MCP] Received request: method={}, id={:?}, tool={}, arguments={}",
+            req.method,
+            req.id,
+            tool_name,
+            redacted_args
+        );
+    } else {
+        tracing::info!("[MCP] Received request: method={}, id={:?}", req.method, req.id);
+    }
 
     // Per MCP spec, notifications (no id field) should return HTTP 202 Accepted with no body
     let is_notification = req.id.is_none();
