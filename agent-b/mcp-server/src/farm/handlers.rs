@@ -1278,6 +1278,25 @@ pub async fn handle_confirm_vgs_credit_card_payment(
         ));
     }
 
+    // Require a zpi_response containing a charge_bundle — this is set by
+    // zpi-zkpay pay-with-vgs-credit-card and proves an actual charge was made.
+    // Without this check an LLM can mark orders as PAID without charging the card.
+    let has_charge_evidence = req.zpi_response.as_ref().and_then(|v| v.get("charge_bundle")).is_some()
+        || req.zpi_response.as_ref().and_then(|v| v.get("external_id")).is_some();
+    if !has_charge_evidence {
+        tracing::warn!(
+            "[FARM-VGS] confirm-vgs-credit-card-payment REJECTED (no charge evidence): order_id={}",
+            req.order_id
+        );
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(FarmToolResponse::err(
+                400,
+                "zpi_response from pay-with-vgs-credit-card is required (must contain charge_bundle or external_id)".to_string(),
+            )),
+        ));
+    }
+
     let order = {
         let state = state.read().await;
         state.orders.get(&req.order_id).cloned()
