@@ -139,6 +139,17 @@ pub struct ConfirmVgsCreditCardPaymentRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct FarmConfirmPaymentRequest {
+    pub charge_bundle: String,
+    pub external_id: String,
+    pub merchant_id: String,
+    #[serde(default)]
+    pub psp_provider: Option<String>,
+    #[serde(default)]
+    pub psp_endpoint: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct TamperModeRequest {
     pub enabled: bool,
     pub multiplier: Option<f64>,
@@ -1331,6 +1342,263 @@ pub async fn handle_confirm_vgs_credit_card_payment(
     }))))
 }
 
+// ── farm-confirm-payment: JWE decryption + PSP forwarding ───────────────────
+
+/// Decode the protected header of a JWE compact serialization.
+/// Returns the header as a JSON object.
+fn decode_jwe_header(compact: &str) -> Result<serde_json::Value, String> {
+    let part = compact.split('.').next().ok_or("empty JWE")?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(part)
+        .map_err(|e| format!("base64 decode header: {e}"))?;
+    serde_json::from_slice(&bytes).map_err(|e| format!("parse JWE header: {e}"))
+}
+
+/// Load the merchant EC private JWK from the `MERCHANT_PRIVATE_JWK` environment variable.
+/// The variable must contain the full JWK JSON (EC or RSA).
+fn load_merchant_private_jwk(_merchant_id: &str) -> Result<josekit::jwk::Jwk, String> {
+    let raw = std::env::var("MERCHANT_PRIVATE_JWK")
+        .map_err(|_| "MERCHANT_PRIVATE_JWK env var is not set".to_string())?;
+    let jwk: josekit::jwk::Jwk =
+        serde_json::from_str(&raw).map_err(|e| format!("parse MERCHANT_PRIVATE_JWK: {e}"))?;
+    Ok(jwk)
+}
+
+pub async fn handle_farm_confirm_payment(
+    State(_state): State<SharedFarmState>,
+    State(_db): State<SharedMerchantDb>,
+    Json(req): Json<FarmConfirmPaymentRequest>,
+) -> Result<Json<FarmToolResponse>, (StatusCode, Json<FarmToolResponse>)> {
+    tracing::info!(
+        "[FARM-CONFIRM] farm-confirm-payment called: merchant_id={}, external_id={}",
+        req.merchant_id,
+        req.external_id,
+    );
+
+    // 1. Decode JWE protected header and check kid
+    let header = decode_jwe_header(&req.charge_bundle).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(FarmToolResponse::err(400, format!("Invalid charge_bundle: {e}"))),
+        )
+    })?;
+    if let Some(kid) = header.get("kid").and_then(|v| v.as_str()) {
+        if kid != req.merchant_id {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(FarmToolResponse::err(
+                    400,
+                    format!(
+                        "JWE kid mismatch: bundle kid='{kid}' does not match merchant_id='{}'",
+                        req.merchant_id
+                    ),
+                )),
+            ));
+        }
+    }
+
+    // 2. Load merchant private key
+    let private_jwk = load_merchant_private_jwk(&req.merchant_id).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(FarmToolResponse::err(500, e)),
+        )
+    })?;
+
+    // 3. Decrypt the JWE
+    let alg_str: String = header
+        .get("alg")
+        .and_then(|v| v.as_str())
+        .unwrap_or("ECDH-ES+A256KW")
+        .to_string();
+
+    let plaintext_bytes: Vec<u8> = tokio::task::spawn_blocking({
+        let bundle = req.charge_bundle.clone();
+        let alg_str_inner = alg_str.clone();
+        move || -> Result<Vec<u8>, String> {
+            let decrypter = match alg_str_inner.as_str() {
+                "ECDH-ES+A256KW" => josekit::jwe::ECDH_ES_A256KW
+                    .decrypter_from_jwk(&private_jwk)
+                    .map_err(|e| format!("build decrypter: {e}"))?,
+                "ECDH-ES+A128KW" => josekit::jwe::ECDH_ES_A128KW
+                    .decrypter_from_jwk(&private_jwk)
+                    .map_err(|e| format!("build decrypter: {e}"))?,
+                "ECDH-ES" => josekit::jwe::ECDH_ES
+                    .decrypter_from_jwk(&private_jwk)
+                    .map_err(|e| format!("build decrypter: {e}"))?,
+                other => return Err(format!("Unsupported JWE alg: {other}")),
+            };
+            let (payload, _hdr) = josekit::jwe::deserialize_compact(&bundle, &decrypter)
+                .map_err(|e| format!("JWE decryption failed: {e}"))?;
+            Ok(payload)
+        }
+    })
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(FarmToolResponse::err(500, format!("spawn_blocking: {e}"))),
+        )
+    })?
+    .map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(FarmToolResponse::err(400, e)),
+        )
+    })?;
+
+    // 4. Parse decrypted payload
+    let decrypted: serde_json::Value =
+        serde_json::from_slice(&plaintext_bytes).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(FarmToolResponse::err(
+                    400,
+                    format!("Decrypted payload is not valid JSON: {e}"),
+                )),
+            )
+        })?;
+
+    // 5. Validate external_id
+    let bundle_external_id = decrypted
+        .get("external_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if bundle_external_id.is_empty() || bundle_external_id != req.external_id {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(FarmToolResponse::err(
+                400,
+                format!(
+                    "external_id mismatch: arg='{}', bundle='{}'",
+                    req.external_id, bundle_external_id
+                ),
+            )),
+        ));
+    }
+
+    tracing::info!(
+        "[FARM-CONFIRM] Decrypted charge bundle: merchant_id={}, external_id={}, alg={}",
+        req.merchant_id,
+        req.external_id,
+        alg_str,
+    );
+
+    // 6. Resolve PSP endpoint
+    let psp_endpoint = if let Some(ref ep) = req.psp_endpoint {
+        ep.clone()
+    } else {
+        let psp_config_raw = std::env::var("MERCHANT_PSP_CONFIG_JSON").unwrap_or_default();
+        let mut ep: Option<String> = None;
+        if !psp_config_raw.is_empty() {
+            if let Ok(map) = serde_json::from_str::<serde_json::Value>(&psp_config_raw) {
+                ep = map
+                    .get(&req.merchant_id)
+                    .and_then(|v| v.get("endpoint"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+            }
+        }
+        ep.unwrap_or_else(|| {
+            let base = std::env::var("ZPI_ZKPAY_BASE_URL")
+                .or_else(|_| std::env::var("ZPI_BASE_URL"))
+                .unwrap_or_else(|_| "http://localhost:3002".to_string());
+            format!("{}/psp/charge", base.trim_end_matches('/'))
+        })
+    };
+
+    let psp_provider = req.psp_provider.unwrap_or_else(|| "zpi-zkpay".to_string());
+
+    // 7. POST payment bundle to PSP
+    let psp_body = serde_json::json!({
+        "merchant_id": req.merchant_id,
+        "external_id": req.external_id,
+        "payment_bundle": decrypted,
+    });
+
+    tracing::info!(
+        "[FARM-CONFIRM] Forwarding to PSP: provider={}, endpoint={}",
+        psp_provider,
+        psp_endpoint,
+    );
+
+    let http_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(FarmToolResponse::err(500, format!("reqwest client: {e}"))),
+            )
+        })?;
+
+    let psp_resp = http_client
+        .post(&psp_endpoint)
+        .json(&psp_body)
+        .send()
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(FarmToolResponse::err(502, format!("PSP request failed: {e}"))),
+            )
+        })?;
+
+    let psp_status = psp_resp.status().as_u16();
+    let psp_ok = psp_resp.status().is_success();
+    let psp_text = psp_resp.text().await.unwrap_or_default();
+    let psp_json: serde_json::Value = serde_json::from_str(&psp_text)
+        .unwrap_or_else(|_| serde_json::json!({ "raw": psp_text }));
+
+    if !psp_ok {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            Json(FarmToolResponse::err(
+                502,
+                format!("PSP call failed: HTTP {psp_status} — {}", &psp_text[..psp_text.len().min(256)]),
+            )),
+        ));
+    }
+
+    tracing::info!(
+        "[FARM-CONFIRM] PSP response: provider={}, status={}",
+        psp_provider,
+        psp_status,
+    );
+
+    let payment_credential_mode = decrypted
+        .get("paymentCredentialMode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let vgs_alias = decrypted
+        .get("vgsAlias")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let last4 = if vgs_alias.len() >= 4 {
+        Some(vgs_alias[vgs_alias.len() - 4..].to_string())
+    } else {
+        None
+    };
+
+    Ok(Json(FarmToolResponse::ok(serde_json::json!({
+        "status": "PAID",
+        "order_confirmed": true,
+        "external_id": req.external_id,
+        "merchant_id": req.merchant_id,
+        "psp_provider": psp_provider,
+        "psp_endpoint": psp_endpoint,
+        "psp_status": psp_status,
+        "psp_response": psp_json,
+        "decrypted_summary": {
+            "payment_credential_mode": payment_credential_mode,
+            "amount": decrypted.get("amount"),
+            "currency": decrypted.get("currency"),
+            "last4": last4,
+        },
+    }))))
+}
+
 // ── Handlers ─────────────────────────────────────────────────────
 
 pub async fn handle_list_products(
@@ -2141,6 +2409,36 @@ pub fn farm_tool_definitions() -> Vec<serde_json::Value> {
                     }
                 },
                 "required": ["merchant_url", "amount", "description"]
+            }
+        }),
+        json!({
+            "name": "farm-confirm-payment",
+            "description": "Merchant-side payment confirmation: decrypts a JWE charge_bundle with the merchant's EC private key (ECDH-ES+A256KW / A256GCM), validates the external_id, and forwards the plaintext payment bundle to the configured PSP endpoint. Returns PAID status with a decrypted summary.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "charge_bundle": {
+                        "type": "string",
+                        "description": "JWE compact serialization returned by zpi-zkpay pay-with-vgs-credit-card."
+                    },
+                    "external_id": {
+                        "type": "string",
+                        "description": "External payment ID to validate against the decrypted bundle."
+                    },
+                    "merchant_id": {
+                        "type": "string",
+                        "description": "Merchant identifier; must match the JWE kid header."
+                    },
+                    "psp_provider": {
+                        "type": "string",
+                        "description": "Optional PSP provider name label (default: zpi-zkpay)."
+                    },
+                    "psp_endpoint": {
+                        "type": "string",
+                        "description": "Optional override for the PSP charge endpoint URL."
+                    }
+                },
+                "required": ["charge_bundle", "external_id", "merchant_id"]
             }
         }),
         json!({

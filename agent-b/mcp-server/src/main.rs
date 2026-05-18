@@ -493,6 +493,13 @@ async fn dispatch_farm_tool(
                 Err((_, axum::Json(r))) => r,
             }
         }
+        "farm-confirm-payment" => {
+            let req: handlers::FarmConfirmPaymentRequest = serde_json::from_value(args_value).ok()?;
+            match handlers::handle_farm_confirm_payment(State(farm_state), State(merchant_db), Json(req)).await {
+                Ok(axum::Json(r)) => r,
+                Err((_, axum::Json(r))) => r,
+            }
+        }
         "farm-clear-cart" => {
             let req: handlers::ClearCartRequest = serde_json::from_value(args_value).ok()?;
             let axum::Json(r) = handlers::handle_clear_cart(State(farm_state), Json(req)).await;
@@ -969,6 +976,7 @@ async fn main() -> Result<()> {
         .route("/tools/pay-with-nevermined", post(handlers::handle_pay_with_nevermined))
         .route("/tools/pay-with-vgs-credit-card", post(handlers::handle_pay_with_vgs_credit_card))
         .route("/tools/confirm-vgs-credit-card-payment", post(handlers::handle_confirm_vgs_credit_card_payment))
+        .route("/tools/farm-confirm-payment", post(handlers::handle_farm_confirm_payment))
         .route("/tools/farm-clear-cart", post(handlers::handle_clear_cart))
         .route("/farm/checkout/:order_id", get(handlers::handle_checkout_verify))
         .route("/farm/checkout-nevermined/:order_id", get(handlers::handle_checkout_nevermined))

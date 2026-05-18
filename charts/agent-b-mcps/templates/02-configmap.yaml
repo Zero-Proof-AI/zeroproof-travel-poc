@@ -30,3 +30,6 @@ data:
   SERVER_BASE_URL: https://dev.agentb.zeroproofai.com
   NEVERMINED_DANGER_ACCEPT_INVALID_CERTS: "false"
   NEVERMINED_HTTP_TRACE: "true"
+  # farm-confirm-payment: PSP forwarding
+  ZPI_ZKPAY_BASE_URL: http://zpi-zkpay.mordor.svc.cluster.local:8080
+  MERCHANT_PSP_CONFIG_JSON: ""

@@ -62,6 +62,9 @@ uuid = { version = "1.0", features = ["v4"] }
 # Base64 encoding
 base64 = "0.22"
 
+# JOSE (JWE decryption for charge_bundle: ECDH-ES+A256KW / A256GCM)
+josekit = "0.8"
+
 # Shared utilities
 shared = { path = "../shared" }
 

@@ -76,6 +76,11 @@ spec:
                 secretKeyRef:
                   name: agent-b-mcps
                   key: NVM_API_KEY
+            - name: MERCHANT_PRIVATE_JWK
+              valueFrom:
+                secretKeyRef:
+                  name: agent-b-mcps
+                  key: MERCHANT_PRIVATE_JWK
             - name: ZPI_ZKPAY_URL
               valueFrom:
                 configMapKeyRef:
@@ -171,6 +176,16 @@ spec:
                 configMapKeyRef:
                   name: agent-b-mcps-config
                   key: SERVER_BASE_URL
+            - name: ZPI_ZKPAY_BASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: agent-b-mcps-config
+                  key: ZPI_ZKPAY_BASE_URL
+            - name: MERCHANT_PSP_CONFIG_JSON
+              valueFrom:
+                configMapKeyRef:
+                  name: agent-b-mcps-config
+                  key: MERCHANT_PSP_CONFIG_JSON
           livenessProbe:
             httpGet:
               path: /health
