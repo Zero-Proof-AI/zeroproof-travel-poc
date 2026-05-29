@@ -992,6 +992,11 @@ async fn main() -> Result<()> {
         // Orders API
         .route("/api/orders", get(handlers::handle_list_orders))
         .route("/api/orders/:id/status", put(handlers::handle_update_order_status))
+        // Stripe Checkout
+        .route("/api/stripe/create-checkout-session", post(farm::stripe::handle_create_checkout_session))
+        .route("/api/stripe/webhook", post(farm::stripe::handle_stripe_webhook))
+        .route("/stripe/success", get(farm::stripe::handle_stripe_success))
+        .route("/stripe/cancel", get(farm::stripe::handle_stripe_cancel))
         // Admin / Test API
         .route("/api/admin/tamper-mode", post(handlers::handle_tamper_mode))
         .route("/api/admin/tamper-mode", get(handlers::handle_tamper_status))

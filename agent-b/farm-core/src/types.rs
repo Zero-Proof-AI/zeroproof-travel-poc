@@ -78,6 +78,7 @@ pub enum PaymentMethod {
     X402Crypto,
     CreditCard,
     Plaid,
+    Stripe,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

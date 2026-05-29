@@ -330,6 +330,9 @@
     }
     .checkout-btn:hover { background: var(--green-light); }
     .checkout-btn:disabled { background: var(--gray-600); cursor: not-allowed; }
+    .stripe-btn { background: #635bff; margin-top: 0.5rem; }
+    .stripe-btn:hover { background: #7c73ff; }
+    .stripe-btn:disabled { background: var(--gray-600); cursor: not-allowed; }
     .empty-cart { text-align: center; color: var(--gray-600); padding: 2rem; }
 
     /* ── Enrollment Modal ───────────────────────────────── */
@@ -615,6 +618,9 @@
         <button class="checkout-btn" id="checkoutBtn" onclick="checkout()" disabled>
           Pay with Crypto (x402)
         </button>
+        <button class="checkout-btn stripe-btn" id="stripeCheckoutBtn" onclick="checkoutWithStripe()" disabled>
+          💳 Pay with Card (Stripe)
+        </button>
       </div>
     </div>
   </div>
@@ -871,6 +877,7 @@
       document.getElementById('cartCount').textContent = totalItems;
       document.getElementById('cartTotal').textContent = '$' + (totalCents / 100).toFixed(2);
       document.getElementById('checkoutBtn').disabled = cart.length === 0;
+      document.getElementById('stripeCheckoutBtn').disabled = cart.length === 0;
 
       const el = document.getElementById('cartItems');
       if (cart.length === 0) {
@@ -891,6 +898,42 @@
 
     function toggleCart() {
       document.getElementById('cartOverlay').classList.toggle('open');
+    }
+
+    // ── Stripe Checkout ────────────────────────────────────
+    async function checkoutWithStripe() {
+      const btn = document.getElementById('stripeCheckoutBtn');
+      btn.disabled = true;
+      btn.textContent = 'Redirecting to Stripe...';
+
+      try {
+        const items = cart.map(c => ({
+          name: c.name,
+          quantity: c.quantity,
+          unit_price_cents: c.unit_price_cents,
+        }));
+
+        const resp = await fetch('/api/stripe/create-checkout-session', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ items }),
+        });
+
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          throw new Error(err.error || 'Failed to create Stripe checkout session');
+        }
+
+        const data = await resp.json();
+        if (!data.url) throw new Error('No redirect URL from Stripe');
+
+        // Redirect to Stripe-hosted checkout page
+        window.location.href = data.url;
+      } catch (e) {
+        showToast('Stripe checkout failed: ' + e.message, 'error');
+        btn.disabled = cart.length === 0;
+        btn.textContent = '\ud83d\udcb3 Pay with Card (Stripe)';
+      }
     }
 
     // ── Checkout ──────────────────────────────────────────

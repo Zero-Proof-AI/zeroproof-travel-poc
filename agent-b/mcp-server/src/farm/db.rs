@@ -192,6 +192,32 @@ impl MerchantDb {
         Ok(())
     }
 
+    /// Find a single order by its Stripe session_id.
+    pub fn get_order_by_session_id(&self, session_id: &str) -> Option<OrderRow> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT order_id, session_id, items_json, total_cents, status, payment_method,
+                    tx_hash, network, created_at, updated_at
+             FROM orders WHERE session_id = ?1 LIMIT 1",
+            params![session_id],
+            |row| {
+                Ok(OrderRow {
+                    order_id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    items_json: row.get(2)?,
+                    total_cents: row.get::<_, i64>(3)? as u64,
+                    status: row.get(4)?,
+                    payment_method: row.get(5)?,
+                    tx_hash: row.get(6)?,
+                    network: row.get(7)?,
+                    created_at: row.get(8)?,
+                    updated_at: row.get(9)?,
+                })
+            },
+        )
+        .ok()
+    }
+
     /// List all orders, most recent first.
     pub fn list_orders(&self) -> anyhow::Result<Vec<OrderRow>> {
         let conn = self.conn.lock().unwrap();

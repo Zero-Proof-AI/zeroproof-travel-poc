@@ -62,6 +62,7 @@ dependencies = [
  "farm-core",
  "futures",
  "hex",
+ "hmac",
  "josekit",
  "once_cell",
  "pricing-core",

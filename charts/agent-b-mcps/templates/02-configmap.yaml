@@ -33,3 +33,5 @@ data:
   # farm-confirm-payment: PSP forwarding
   ZPI_ZKPAY_BASE_URL: http://zpi-zkpay.mordor.svc.cluster.local:8080
   MERCHANT_PSP_CONFIG_JSON: ""
+  # Set to "false" when switching to live Stripe credentials + VGS outbound routing.
+  STRIPE_DPAN_MOCK_SUCCESS: "true"

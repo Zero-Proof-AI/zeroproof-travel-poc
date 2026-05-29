@@ -186,6 +186,26 @@ spec:
                 configMapKeyRef:
                   name: agent-b-mcps-config
                   key: MERCHANT_PSP_CONFIG_JSON
+            - name: STRIPE_DPAN_MOCK_SUCCESS
+              valueFrom:
+                configMapKeyRef:
+                  name: agent-b-mcps-config
+                  key: STRIPE_DPAN_MOCK_SUCCESS
+            - name: STRIPE_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: agent-b-mcps
+                  key: STRIPE_SECRET_KEY
+            - name: STRIPE_PUBLISHABLE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: agent-b-mcps
+                  key: STRIPE_PUBLISHABLE_KEY
+            - name: STRIPE_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: agent-b-mcps
+                  key: STRIPE_WEBHOOK_SECRET
           livenessProbe:
             httpGet:
               path: /health

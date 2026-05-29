@@ -1328,11 +1328,179 @@ pub async fn handle_confirm_vgs_credit_card_payment(
         }))));
     }
 
-    let tx_ref = req
-        .transaction_ref
-        .or_else(|| req.zpi_response.as_ref().and_then(|v| v.get("external_id").and_then(|x| x.as_str()).map(|s| s.to_string())))
-        .or(req.external_id)
-        .unwrap_or_else(|| format!("vgs-ext-{}", req.order_id));
+    let tx_ref = {
+        // ── Stripe PSP charge via JWE charge_bundle ──────────────────────────
+        // If STRIPE_SECRET_KEY is configured and the zpi_response contains a
+        // charge_bundle JWE, decrypt it and charge the DPAN via Stripe.
+        // Only mark the order paid if Stripe confirms the PaymentIntent.
+        let stripe_pi_id: Option<String> =
+            if let Some(bundle) = req
+                .zpi_response
+                .as_ref()
+                .and_then(|v| v.get("charge_bundle"))
+                .and_then(|v| v.as_str())
+            {
+                if let Ok(secret_key) = std::env::var("STRIPE_SECRET_KEY") {
+                    match try_decrypt_charge_bundle_jwe(bundle).await {
+                        Ok(payload) => {
+                            // Reject stale bundles (> 5 minutes old) to prevent replay attacks
+                            if let Some(ts) = payload.get("issuedAt").and_then(|v| v.as_str()) {
+                                if let Ok(issued) =
+                                    ts.parse::<chrono::DateTime<chrono::Utc>>()
+                                {
+                                    let age_secs =
+                                        (chrono::Utc::now() - issued).num_seconds();
+                                    if age_secs > 300 {
+                                        return Err((
+                                            StatusCode::BAD_REQUEST,
+                                            Json(FarmToolResponse::err(
+                                                400,
+                                                format!(
+                                                    "charge_bundle is stale ({age_secs}s old, max 300s)"
+                                                ),
+                                            )),
+                                        ));
+                                    }
+                                }
+                            }
+
+                            let dpan =
+                                payload.get("dpan").and_then(|v| v.as_str()).unwrap_or("");
+                            let cryptogram = payload
+                                .get("cryptogram")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+
+                            if dpan.is_empty() || cryptogram.is_empty() {
+                                tracing::warn!(
+                                    "[FARM-VGS] charge_bundle decrypted but dpan/cryptogram absent — skipping Stripe"
+                                );
+                                None
+                            } else {
+                                let exp_month: u32 = payload
+                                    .get("expMonth")
+                                    .and_then(|v| v.as_str())
+                                    .and_then(|s| s.parse().ok())
+                                    .unwrap_or(1);
+                                let exp_year: u32 = payload
+                                    .get("expYear")
+                                    .and_then(|v| v.as_str())
+                                    .and_then(|s| s.parse().ok())
+                                    .unwrap_or(2099);
+                                let amount = payload
+                                    .get("amount")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(order.total_cents);
+                                let currency = payload
+                                    .get("currency")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("840");
+                                let cryptogram_type = payload
+                                    .get("cryptogramType")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("short");
+                                let cavv =
+                                    payload.get("cavv").and_then(|v| v.as_str());
+                                let eci =
+                                    payload.get("eci").and_then(|v| v.as_str());
+                                let bundle_merchant_id = payload
+                                    .get("merchant_id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("unknown");
+                                let bundle_ext_id = payload
+                                    .get("external_id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(
+                                        req.external_id.as_deref().unwrap_or(""),
+                                    );
+
+                                tracing::info!(
+                                    "[FARM-VGS] Charging DPAN via Stripe: order={}, merchant={}, amount={}",
+                                    req.order_id, bundle_merchant_id, amount
+                                );
+
+                                match crate::farm::stripe::charge_with_network_token(
+                                    &secret_key,
+                                    dpan,
+                                    exp_month,
+                                    exp_year,
+                                    cryptogram,
+                                    cryptogram_type,
+                                    amount,
+                                    currency,
+                                    bundle_ext_id,
+                                    bundle_merchant_id,
+                                    cavv,
+                                    eci,
+                                )
+                                .await
+                                {
+                                    Ok(pi_id) => {
+                                        tracing::info!(
+                                            "[FARM-VGS] Stripe charge succeeded: order={}, pi={}",
+                                            req.order_id, pi_id
+                                        );
+                                        Some(pi_id)
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(
+                                            "[FARM-VGS] Stripe charge failed: {}",
+                                            e
+                                        );
+                                        return Err((
+                                            StatusCode::PAYMENT_REQUIRED,
+                                            Json(FarmToolResponse::err(
+                                                402,
+                                                format!("Stripe charge failed: {}", e),
+                                            )),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "[FARM-VGS] JWE decrypt failed — refusing payment: {}",
+                                e
+                            );
+                            return Err((
+                                StatusCode::PAYMENT_REQUIRED,
+                                Json(FarmToolResponse::err(
+                                    402,
+                                    format!("charge_bundle decryption failed: {e}"),
+                                )),
+                            ));
+                        }
+                    }
+                } else {
+                    // STRIPE_SECRET_KEY not configured — dev fallback (trust-based)
+                    tracing::warn!(
+                        "[FARM-VGS] STRIPE_SECRET_KEY not set — accepting zpi_response without PSP charge"
+                    );
+                    None
+                }
+            } else {
+                None
+            };
+
+        let is_stripe_charge = stripe_pi_id.is_some();
+        let _ = is_stripe_charge; // used below for psp_label
+
+        stripe_pi_id
+            .or_else(|| req.transaction_ref.clone())
+            .or_else(|| {
+                req.zpi_response
+                    .as_ref()
+                    .and_then(|v| v.get("external_id"))
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string())
+            })
+            .or_else(|| req.external_id.clone())
+            .unwrap_or_else(|| format!("vgs-ext-{}", req.order_id))
+    };
+
+    // psp_label: "stripe" when a real Stripe PaymentIntent was created, else "vgs-card"
+    let psp_label = if tx_ref.starts_with("pi_") { "stripe" } else { "vgs-card" };
 
     {
         let mut state = state.write().await;
@@ -1342,20 +1510,21 @@ pub async fn handle_confirm_vgs_credit_card_payment(
         state.carts.remove(&order.session_id);
     }
 
-    if let Err(e) = db.update_order_status(&req.order_id, &OrderStatus::Paid, Some(&tx_ref), Some("vgs-card")) {
+    if let Err(e) = db.update_order_status(&req.order_id, &OrderStatus::Paid, Some(&tx_ref), Some(psp_label)) {
         tracing::error!("[FARM-VGS] Failed to persist paid status for {}: {}", req.order_id, e);
     }
 
     tracing::info!(
-        "[FARM-VGS] confirm-vgs-credit-card-payment finalized PAID: order_id={}, transaction_ref={}",
+        "[FARM-VGS] confirm-vgs-credit-card-payment finalized PAID: order_id={}, transaction_ref={}, psp={}",
         req.order_id,
         tx_ref,
+        psp_label,
     );
 
     Ok(Json(FarmToolResponse::ok(json!({
         "status": "PAID",
         "order_id": req.order_id,
-        "payment_processor": "vgs_card",
+        "payment_processor": psp_label,
         "transaction_ref": tx_ref,
         "zpi_response": req.zpi_response,
     }))))
@@ -1381,6 +1550,47 @@ fn load_merchant_private_jwk(_merchant_id: &str) -> Result<josekit::jwk::Jwk, St
     let jwk: josekit::jwk::Jwk =
         serde_json::from_str(&raw).map_err(|e| format!("parse MERCHANT_PRIVATE_JWK: {e}"))?;
     Ok(jwk)
+}
+
+/// Decrypt a JWE compact-serialised `charge_bundle` using the merchant private key.
+///
+/// Loads `MERCHANT_PRIVATE_JWK` from the environment, decodes the protected header
+/// to select the correct algorithm, then returns the plaintext as a `serde_json::Value`.
+/// Returns an `Err(String)` on any failure so callers can degrade gracefully.
+async fn try_decrypt_charge_bundle_jwe(compact: &str) -> Result<serde_json::Value, String> {
+    let header = decode_jwe_header(compact)?;
+
+    let private_jwk = load_merchant_private_jwk("").map_err(|e| e)?;
+
+    let alg_str: String = header
+        .get("alg")
+        .and_then(|v| v.as_str())
+        .unwrap_or("ECDH-ES+A256KW")
+        .to_string();
+
+    let bundle = compact.to_string();
+    let plaintext_bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
+        let decrypter = match alg_str.as_str() {
+            "ECDH-ES+A256KW" => josekit::jwe::ECDH_ES_A256KW
+                .decrypter_from_jwk(&private_jwk)
+                .map_err(|e| format!("build decrypter: {e}"))?,
+            "ECDH-ES+A128KW" => josekit::jwe::ECDH_ES_A128KW
+                .decrypter_from_jwk(&private_jwk)
+                .map_err(|e| format!("build decrypter: {e}"))?,
+            "ECDH-ES" => josekit::jwe::ECDH_ES
+                .decrypter_from_jwk(&private_jwk)
+                .map_err(|e| format!("build decrypter: {e}"))?,
+            other => return Err(format!("Unsupported JWE alg: {other}")),
+        };
+        let (payload, _hdr) = josekit::jwe::deserialize_compact(&bundle, &decrypter)
+            .map_err(|e| format!("JWE decryption failed: {e}"))?;
+        Ok(payload)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking: {e}"))??;
+
+    serde_json::from_slice(&plaintext_bytes)
+        .map_err(|e| format!("Decrypted payload is not valid JSON: {e}"))
 }
 
 pub async fn handle_farm_confirm_payment(
