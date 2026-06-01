@@ -94,6 +94,12 @@ pub struct PayWithNeverminedRequest {
     /// value here.
     #[serde(default)]
     pub plan_id: Option<String>,
+    /// Short opaque reference returned by ZPI-ZKPay's pay-with-nevermined
+    /// response. When present, agent-b fetches the full x402 token directly
+    /// from ZPI-ZKPay over localhost instead of relying on the token Claude
+    /// relayed (which can corrupt ~1 byte per ~5 relays).
+    #[serde(default)]
+    pub token_ref: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -854,7 +860,7 @@ async fn verify_nevermined_token_if_configured(
 
 async fn settle_nevermined_token(
     token: &str,
-    amount_cents: u64,
+    _amount_cents: u64,
     resource_url: &str,
     plan_id_override: Option<&str>,
 ) -> Result<Option<String>, String> {
@@ -914,7 +920,14 @@ async fn settle_nevermined_token(
         return Err(format!("Nevermined Visa settle {} ({})", status, raw_body));
     }
 
-    let credits_used = amount_cents as i64;
+    // Nevermined credits are NOT cents. `creditsUsed` is the number of plan
+    // credits to burn per request (typically 1). Passing `amount_cents` here
+    // would request burning thousands of credits for a single checkout.
+    // Allow override via NEVERMINED_CREDITS_PER_REQUEST; default to 1.
+    let credits_used: i64 = std::env::var("NEVERMINED_CREDITS_PER_REQUEST")
+        .ok()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .unwrap_or(1);
 
     let network = std::env::var("NEVERMINED_NETWORK").unwrap_or_else(|_| {
         if scheme == "nvm:card-delegation" { "stripe".to_string() } else { "eip155:84532".to_string() }
@@ -1293,6 +1306,11 @@ pub async fn handle_pay_with_nevermined(
             .payload_encoded
             .as_deref()
             .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
+        || req
+            .token_ref
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
             .unwrap_or(false);
 
     if zpi_proof.trim().is_empty() && !has_supplied_token {
@@ -1404,7 +1422,7 @@ pub async fn handle_pay_with_nevermined(
             StatusCode::BAD_REQUEST,
             Json(FarmToolResponse::err(
                 400,
-                "zpi_proof_id is required when x402_access_token is supplied so the merchant can verify the ZPI intent proof against the attester".to_string(),
+                "zpi_proof_id is required when x402_access_token/token_ref is supplied so the merchant can verify the ZPI intent proof against the attester".to_string(),
             )),
         ));
     }
@@ -1426,15 +1444,73 @@ pub async fn handle_pay_with_nevermined(
 
     // ── Resolve the payment credential ───────────────────────────────────
     // ZPI-ZKPay owns /x402/permissions (it holds the user's NVM API key).
-    // When `x402_access_token` is supplied, use it verbatim. When it's missing,
-    // fall back to the legacy path (mint locally using NVM_API_KEY) so older
-    // demos that haven't been updated keep working — emit a visible warning.
-    let supplied_token = req
-        .x402_access_token
-        .as_deref()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
+    // When `token_ref` is present, fetch the full token directly from
+    // ZPI-ZKPay over localhost — this eliminates the ~20% corruption rate
+    // when Claude relays the ~1.1 KB base64 token through tool-call args.
+    // Fall back to `x402_access_token` / `payload_encoded` / legacy mint.
+    let resolved_from_ref = if let Some(ref tref) = req.token_ref {
+        let tref = tref.trim();
+        if !tref.is_empty() {
+            let zkpay_port = std::env::var("ZKPAY_PORT").unwrap_or_else(|_| "3002".to_string());
+            let url = format!("http://localhost:{}/tokens/{}", zkpay_port, tref);
+            tracing::info!(
+                "[FARM-NVM] Resolving token_ref={} from ZPI-ZKPay at {} external_id={}",
+                tref, url, external_id
+            );
+            match reqwest::get(&url).await {
+                Ok(resp) if resp.status().is_success() => {
+                    match resp.json::<serde_json::Value>().await {
+                        Ok(body) => {
+                            let token = body.get("x402_access_token")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                            if token.is_some() {
+                                tracing::info!(
+                                    "[FARM-NVM] token_ref={} resolved successfully — using ZPI-ZKPay-fetched token (corruption-proof) external_id={}",
+                                    tref, external_id
+                                );
+                            }
+                            token
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "[FARM-NVM] token_ref={} response parse failed: {} — falling back to x402_access_token external_id={}",
+                                tref, e, external_id
+                            );
+                            None
+                        }
+                    }
+                }
+                Ok(resp) => {
+                    tracing::warn!(
+                        "[FARM-NVM] token_ref={} returned {} — falling back to x402_access_token external_id={}",
+                        tref, resp.status(), external_id
+                    );
+                    None
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "[FARM-NVM] token_ref={} fetch failed: {} — falling back to x402_access_token external_id={}",
+                        tref, e, external_id
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let supplied_token = resolved_from_ref
+        .or_else(|| {
+            req.x402_access_token
+                .as_deref()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+        })
         .or_else(|| {
             req.payload_encoded
                 .as_deref()
@@ -3150,7 +3226,7 @@ pub fn farm_tool_definitions() -> Vec<serde_json::Value> {
         }),
         json!({
             "name": "pay-with-nevermined",
-            "description": "Complete a Nevermined card payment. PREFERRED FLOW: call zpi-zkpay's pay-with-nevermined-merchant-settles first to mint the x402 token without leaking the user's NVM API key to the merchant, then call this tool with x402_access_token + plan_id + zpi_proof_id (the merchant verifies the ZPI proof against the attester before settling). LEGACY FLOW: first call without zpi_proof returns NEEDS_INTENT_PROOF; second call with external_id + zpi_proof mints internally using the merchant's NVM_API_KEY env var.",
+            "description": "Complete a Nevermined card payment. PREFERRED FLOW: call zpi-zkpay's pay-with-nevermined-merchant-settles first to mint the x402 token, then call this tool with token_ref + plan_id + zpi_proof_id + external_id. The merchant fetches the real token from ZPI-ZKPay over localhost (avoiding corruption). FALLBACK: pass x402_access_token directly instead of token_ref. LEGACY FLOW: first call without zpi_proof returns NEEDS_INTENT_PROOF; second call with external_id + zpi_proof mints internally using the merchant's NVM_API_KEY env var.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -3189,6 +3265,10 @@ pub fn farm_tool_definitions() -> Vec<serde_json::Value> {
                     "plan_id": {
                         "type": "string",
                         "description": "Nevermined planId from zpi-zkpay's payment_required.accepts[0].planId. Required for the preferred flow because the merchant's own NVM key (if any) charges against a different plan."
+                    },
+                    "token_ref": {
+                        "type": "string",
+                        "description": "Short opaque ref (e.g. tref-…) from zpi-zkpay's pay-with-nevermined response. PREFERRED over x402_access_token — the merchant fetches the full token from ZPI-ZKPay over localhost, eliminating relay corruption."
                     }
                 },
                 "required": ["merchant_url", "amount", "description"]
