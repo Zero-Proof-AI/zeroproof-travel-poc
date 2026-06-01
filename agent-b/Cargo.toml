@@ -30,3 +30,8 @@ sha2 = "0.10"
 # Patch section – ensures both crates use the exact same SP1 version
 # ===================================================================
 [patch.crates-io]
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
