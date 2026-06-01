@@ -613,6 +613,7 @@ async fn verify_nevermined_token_if_configured(
     token: &str,
     amount_cents: u64,
     resource_url: &str,
+    plan_id_override: Option<&str>,
 ) -> Result<(), String> {
     let verify_url = match std::env::var("NEVERMINED_VERIFY_URL") {
         Ok(v) if !v.trim().is_empty() => v,
@@ -696,8 +697,13 @@ async fn verify_nevermined_token_if_configured(
         let network = std::env::var("NEVERMINED_NETWORK").unwrap_or_else(|_| {
             if scheme == "nvm:card-delegation" { "stripe".to_string() } else { "eip155:84532".to_string() }
         });
-        let plan_id = std::env::var("NEVERMINED_PLAN_ID").ok()
+        let plan_id = plan_id_override
+            .map(|s| s.to_string())
             .filter(|v| !v.trim().is_empty())
+            .or_else(|| extract_plan_id_from_x402_token(token))
+            .or_else(|| {
+                std::env::var("NEVERMINED_PLAN_ID").ok().filter(|v| !v.trim().is_empty())
+            })
             .or_else(|| std::env::var("NVM_API_KEY").ok().and_then(|k| extract_nvm_plan_id(&k)))
             .unwrap_or_default();
         let payment_required = json!({
@@ -769,8 +775,13 @@ async fn verify_nevermined_token_if_configured(
         let network = std::env::var("NEVERMINED_NETWORK").unwrap_or_else(|_| {
             if scheme == "nvm:card-delegation" { "stripe".to_string() } else { "eip155:84532".to_string() }
         });
-        let plan_id = std::env::var("NEVERMINED_PLAN_ID").ok()
+        let plan_id = plan_id_override
+            .map(|s| s.to_string())
             .filter(|v| !v.trim().is_empty())
+            .or_else(|| extract_plan_id_from_x402_token(token))
+            .or_else(|| {
+                std::env::var("NEVERMINED_PLAN_ID").ok().filter(|v| !v.trim().is_empty())
+            })
             .or_else(|| std::env::var("NVM_API_KEY").ok().and_then(|k| extract_nvm_plan_id(&k)))
             .unwrap_or_default();
         let payment_required = json!({
@@ -1477,7 +1488,19 @@ pub async fn handle_pay_with_nevermined(
         }
     };
 
-    verify_nevermined_token_if_configured(&payment_credential, amount_cents, &req.merchant_url)
+    let plan_id_for_verify = req
+        .plan_id
+        .as_deref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| extract_plan_id_from_x402_token(&payment_credential));
+
+    verify_nevermined_token_if_configured(
+        &payment_credential,
+        amount_cents,
+        &req.merchant_url,
+        plan_id_for_verify.as_deref(),
+    )
         .await
         .map_err(|e| {
             (
@@ -2818,7 +2841,18 @@ pub async fn handle_checkout_nevermined(
         });
     let resource_url = format!("{}/farm/checkout-nevermined/{}", server_base_url, order_id);
 
-    verify_nevermined_token_if_configured(&token, order.total_cents, &resource_url).await.map_err(|e| {
+    let plan_id_for_settle = plan_id_from_header
+        .clone()
+        .or_else(|| extract_plan_id_from_x402_token(&token));
+
+    verify_nevermined_token_if_configured(
+        &token,
+        order.total_cents,
+        &resource_url,
+        plan_id_for_settle.as_deref(),
+    )
+    .await
+    .map_err(|e| {
         (
             StatusCode::UNAUTHORIZED,
             Json(json!({ "error": e })),
@@ -2837,10 +2871,6 @@ pub async fn handle_checkout_nevermined(
             ));
         }
     }
-
-    let plan_id_for_settle = plan_id_from_header
-        .clone()
-        .or_else(|| extract_plan_id_from_x402_token(&token));
 
     let tx_hash = settle_nevermined_token(
         &token,
