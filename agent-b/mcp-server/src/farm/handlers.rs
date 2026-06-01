@@ -1443,14 +1443,14 @@ pub async fn handle_pay_with_nevermined(
                 .map(|s| s.to_string())
         });
 
-    let (payment_credential, x_nevermined_api_key) = match supplied_token {
+    let (payment_credential, x_nevermined_api_key, token_supplied_by_zkpay) = match supplied_token {
         Some(token) => {
             tracing::info!(
                 "[FARM-NVM] Using x402_access_token supplied by ZPI-ZKPay (mint skipped) external_id={} token={}",
                 external_id,
                 redact_secret(&token)
             );
-            (token, String::new())
+            (token, String::new(), true)
         }
         None => {
             tracing::warn!(
@@ -1484,23 +1484,35 @@ pub async fn handle_pay_with_nevermined(
             } else {
                 nvm_api_key.clone()
             };
-            (cred, nvm_api_key)
+            (cred, nvm_api_key, false)
         }
     };
 
-    let plan_id_for_verify = req
-        .plan_id
-        .as_deref()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .or_else(|| extract_plan_id_from_x402_token(&payment_credential));
+    // The minted x402 token carries a one-shot redeem authorization: Nevermined
+    // /verify consumes it, so a second /verify on the same token fails with
+    // BCK.X402.0005 "invalid signature" (confirmed: byte-identical token,
+    // verified once by ZPI-ZKPay, rejected on the next /verify). When ZPI-ZKPay
+    // supplied the token we therefore must NOT preflight-verify here — the single
+    // authoritative /verify + /settle happens once in handle_checkout_nevermined.
+    if token_supplied_by_zkpay {
+        tracing::info!(
+            "[FARM-NVM] Skipping pay-with-nevermined preflight /verify (token from ZPI-ZKPay; checkout-nevermined will verify + settle once) external_id={}",
+            external_id
+        );
+    } else {
+        let plan_id_for_verify = req
+            .plan_id
+            .as_deref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| extract_plan_id_from_x402_token(&payment_credential));
 
-    verify_nevermined_token_if_configured(
-        &payment_credential,
-        amount_cents,
-        &req.merchant_url,
-        plan_id_for_verify.as_deref(),
-    )
+        verify_nevermined_token_if_configured(
+            &payment_credential,
+            amount_cents,
+            &req.merchant_url,
+            plan_id_for_verify.as_deref(),
+        )
         .await
         .map_err(|e| {
             (
@@ -1508,6 +1520,7 @@ pub async fn handle_pay_with_nevermined(
                 Json(FarmToolResponse::err(502, e)),
             )
         })?;
+    }
 
     let stop_after_verify = std::env::var("NEVERMINED_STOP_AFTER_VERIFY")
         .ok()
