@@ -20,6 +20,10 @@ pub struct PendingNeverminedPayment {
 pub struct VerifiedIntent {
     pub amount_cents: u64,
     pub merchant_url: String,
+    /// ID Claude/ZPI supplied, usually the local `zkp-...` record id.
+    pub zpi_proof_id: String,
+    /// Canonical proof UUID stored by zk-attestation-service.
+    pub attester_proof_id: String,
     pub verified_at: std::time::SystemTime,
 }
 
@@ -104,6 +108,8 @@ mod tests {
             VerifiedIntent {
                 amount_cents: 100,
                 merchant_url: "https://fresh.example".into(),
+                zpi_proof_id: "zkp-fresh".into(),
+                attester_proof_id: "attester-fresh".into(),
                 verified_at: now,
             },
         );
@@ -112,6 +118,8 @@ mod tests {
             VerifiedIntent {
                 amount_cents: 200,
                 merchant_url: "https://stale.example".into(),
+                zpi_proof_id: "zkp-stale".into(),
+                attester_proof_id: "attester-stale".into(),
                 verified_at: stale_at,
             },
         );
