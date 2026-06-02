@@ -1009,6 +1009,20 @@ fn default_zpi_attester_url() -> String {
     std::env::var("ZPI_ATTESTER_URL").unwrap_or_else(|_| "http://localhost:8000".to_string())
 }
 
+/// Whether proofs must commit a `total_amount` field (strict by default).
+///
+/// Unset → `true`. Only an explicit opt-out disables the check:
+/// `ZPI_REQUIRE_AMOUNT_COMMITMENT=false` or `=0`.
+fn zpi_require_amount_commitment() -> bool {
+    match std::env::var("ZPI_REQUIRE_AMOUNT_COMMITMENT") {
+        Ok(v) => {
+            let v = v.trim();
+            !(v.eq_ignore_ascii_case("false") || v == "0")
+        }
+        Err(_) => true,
+    }
+}
+
 /// Verify a ZPI proof against the zk-attestation-service (zero-trust).
 ///
 /// Before settling, the merchant pulls the proof from the attester and
@@ -1478,20 +1492,17 @@ async fn run_zero_trust_proof_checks(
         None => {
             // The conversation's extracted intent didn't include a total_amount
             // predicate, so the proof can't bind the amount cryptographically.
-            // The external_id binding above still holds. Hard-fail only if the
-            // operator demands amount proofs.
-            let require = std::env::var("ZPI_REQUIRE_AMOUNT_COMMITMENT")
-                .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
-                .unwrap_or(false);
+            // The external_id binding above still holds. By default we refuse;
+            // set ZPI_REQUIRE_AMOUNT_COMMITMENT=false to allow legacy proofs.
             let committed_fields: Vec<&String> = committed.keys().collect();
-            if require {
+            if zpi_require_amount_commitment() {
                 return Err(format!(
-                    "[FARM-NVM][ZPI] proof does not commit a `total_amount` field (committed fields: {:?}) and ZPI_REQUIRE_AMOUNT_COMMITMENT=true — refusing.",
+                    "[FARM-NVM][ZPI] proof does not commit a `total_amount` field (committed fields: {:?}) — refusing (amount ZK binding required by default; set ZPI_REQUIRE_AMOUNT_COMMITMENT=false to opt out).",
                     committed_fields
                 ));
             }
             tracing::warn!(
-                "[FARM-NVM][ZPI] proof commits no `total_amount` field (committed: {:?}) — amount not ZK-verified, relying on external_id binding only. Set ZPI_REQUIRE_AMOUNT_COMMITMENT=true to enforce.",
+                "[FARM-NVM][ZPI] proof commits no `total_amount` field (committed: {:?}) — amount not ZK-verified, relying on external_id binding only (ZPI_REQUIRE_AMOUNT_COMMITMENT=false).",
                 committed_fields
             );
         }
