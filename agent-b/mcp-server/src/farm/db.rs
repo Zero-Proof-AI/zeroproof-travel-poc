@@ -41,10 +41,27 @@ impl MerchantDb {
                 payment_method TEXT NOT NULL DEFAULT 'x402_crypto',
                 tx_hash        TEXT,
                 network        TEXT,
+                external_id    TEXT,
+                zpi_proof_id   TEXT,
+                attester_proof_id TEXT,
                 created_at     TEXT NOT NULL DEFAULT (datetime('now')),
                 updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
             ) STRICT;",
         )?;
+        for stmt in [
+            "ALTER TABLE orders ADD COLUMN external_id TEXT",
+            "ALTER TABLE orders ADD COLUMN zpi_proof_id TEXT",
+            "ALTER TABLE orders ADD COLUMN attester_proof_id TEXT",
+        ] {
+            conn.execute(stmt, []).or_else(|e| {
+                // SQLite lacks ADD COLUMN IF NOT EXISTS on older builds; duplicate-column is fine.
+                if e.to_string().contains("duplicate column name") {
+                    Ok(0)
+                } else {
+                    Err(e)
+                }
+            })?;
+        }
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -192,12 +209,33 @@ impl MerchantDb {
         Ok(())
     }
 
+    /// Persist ZPI/Nevermined audit IDs for dispute lookup.
+    pub fn update_order_zpi_audit(
+        &self,
+        order_id: &str,
+        external_id: Option<&str>,
+        zpi_proof_id: Option<&str>,
+        attester_proof_id: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE orders
+             SET external_id = ?1,
+                 zpi_proof_id = ?2,
+                 attester_proof_id = ?3,
+                 updated_at = datetime('now')
+             WHERE order_id = ?4",
+            params![external_id, zpi_proof_id, attester_proof_id, order_id],
+        )?;
+        Ok(())
+    }
+
     /// Find a single order by its Stripe session_id.
     pub fn get_order_by_session_id(&self, session_id: &str) -> Option<OrderRow> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
             "SELECT order_id, session_id, items_json, total_cents, status, payment_method,
-                    tx_hash, network, created_at, updated_at
+                    tx_hash, network, external_id, zpi_proof_id, attester_proof_id, created_at, updated_at
              FROM orders WHERE session_id = ?1 LIMIT 1",
             params![session_id],
             |row| {
@@ -210,8 +248,11 @@ impl MerchantDb {
                     payment_method: row.get(5)?,
                     tx_hash: row.get(6)?,
                     network: row.get(7)?,
-                    created_at: row.get(8)?,
-                    updated_at: row.get(9)?,
+                    external_id: row.get(8)?,
+                    zpi_proof_id: row.get(9)?,
+                    attester_proof_id: row.get(10)?,
+                    created_at: row.get(11)?,
+                    updated_at: row.get(12)?,
                 })
             },
         )
@@ -223,7 +264,7 @@ impl MerchantDb {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT order_id, session_id, items_json, total_cents, status, payment_method,
-                    tx_hash, network, created_at, updated_at
+                    tx_hash, network, external_id, zpi_proof_id, attester_proof_id, created_at, updated_at
              FROM orders ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -236,8 +277,11 @@ impl MerchantDb {
                 payment_method: row.get(5)?,
                 tx_hash: row.get(6)?,
                 network: row.get(7)?,
-                created_at: row.get(8)?,
-                updated_at: row.get(9)?,
+                external_id: row.get(8)?,
+                zpi_proof_id: row.get(9)?,
+                attester_proof_id: row.get(10)?,
+                created_at: row.get(11)?,
+                updated_at: row.get(12)?,
             })
         })?;
         let mut result = Vec::new();
@@ -259,6 +303,9 @@ pub struct OrderRow {
     pub payment_method: String,
     pub tx_hash: Option<String>,
     pub network: Option<String>,
+    pub external_id: Option<String>,
+    pub zpi_proof_id: Option<String>,
+    pub attester_proof_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -324,6 +371,9 @@ mod tests {
         assert_eq!(rows[0].payment_method, "x402_crypto");
         assert!(rows[0].tx_hash.is_none());
         assert!(rows[0].network.is_none());
+        assert!(rows[0].external_id.is_none());
+        assert!(rows[0].zpi_proof_id.is_none());
+        assert!(rows[0].attester_proof_id.is_none());
     }
 
     #[test]
@@ -379,6 +429,31 @@ mod tests {
         assert_eq!(rows[0].status, "paid");
         assert_eq!(rows[0].tx_hash.as_deref(), Some("0xabc123"));
         assert_eq!(rows[0].network.as_deref(), Some("eip155:84532"));
+    }
+
+    #[test]
+    fn update_order_zpi_audit_ids() {
+        let db = mem_db();
+        db.insert_order(&sample_order("ord-audit")).unwrap();
+
+        db.update_order_zpi_audit(
+            "ord-audit",
+            Some("550e8400-e29b-41d4-a716-446655440000"),
+            Some("zkp-local"),
+            Some("2a4c5d66-7b76-440d-9b9b-87dc076e1501"),
+        )
+        .unwrap();
+
+        let rows = db.list_orders().unwrap();
+        assert_eq!(
+            rows[0].external_id.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
+        assert_eq!(rows[0].zpi_proof_id.as_deref(), Some("zkp-local"));
+        assert_eq!(
+            rows[0].attester_proof_id.as_deref(),
+            Some("2a4c5d66-7b76-440d-9b9b-87dc076e1501")
+        );
     }
 
     #[test]
