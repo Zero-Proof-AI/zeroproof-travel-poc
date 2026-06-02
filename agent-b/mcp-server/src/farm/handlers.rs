@@ -4154,3 +4154,125 @@ pub async fn handle_update_order_status(
         Json(json!({ "order_id": order_id, "status": body.status })),
     )
 }
+
+#[cfg(test)]
+mod nvm_zpi_tests {
+    use super::*;
+
+    /// Build a valid SP1 public_values hex fixture matching `parse_committed_public_values`.
+    fn build_public_values_fixture() -> String {
+        let mut bytes = vec![0u8; 32];
+        bytes.extend(bincode::serialize(&3u32).unwrap());
+        bytes.extend(bincode::serialize(&"ext-abc".to_string()).unwrap());
+        bytes.extend(
+            bincode::serialize(&vec![
+                ("total_amount".to_string(), [7u8; 32]),
+                ("currency".to_string(), [9u8; 32]),
+            ])
+            .unwrap(),
+        );
+        hex::encode(bytes)
+    }
+
+    #[test]
+    fn test_compute_field_commitment_known_vector() {
+        // Independently computed: printf 'total_amount:1000:ext-123:salthex' | shasum -a 256
+        let expected = "dd295f016f69bf67d2ec9241905dc97d00c4a8097c8765ec859a396128bd115c";
+        assert_eq!(
+            compute_field_commitment("total_amount", "1000", "ext-123", "salthex"),
+            expected
+        );
+    }
+
+    #[test]
+    fn test_compute_field_commitment_changes_with_each_input() {
+        let baseline =
+            compute_field_commitment("total_amount", "1000", "ext-123", "salthex");
+        assert_ne!(
+            compute_field_commitment("other_field", "1000", "ext-123", "salthex"),
+            baseline
+        );
+        assert_ne!(
+            compute_field_commitment("total_amount", "999", "ext-123", "salthex"),
+            baseline
+        );
+        assert_ne!(
+            compute_field_commitment("total_amount", "1000", "ext-456", "salthex"),
+            baseline
+        );
+        assert_ne!(
+            compute_field_commitment("total_amount", "1000", "ext-123", "other-salt"),
+            baseline
+        );
+    }
+
+    #[test]
+    fn test_parse_public_values_roundtrip() {
+        let hex_fixture = build_public_values_fixture();
+        let (external_id, commitments) =
+            parse_committed_public_values(&hex_fixture).expect("valid fixture should parse");
+
+        assert_eq!(external_id, "ext-abc");
+        assert_eq!(commitments.len(), 2);
+        assert_eq!(commitments["total_amount"], "07".repeat(32));
+        assert_eq!(commitments["currency"], "09".repeat(32));
+    }
+
+    #[test]
+    fn test_parse_public_values_accepts_0x_prefix() {
+        let hex_fixture = build_public_values_fixture();
+        let prefixed = format!("0x{hex_fixture}");
+        let (external_id, commitments) =
+            parse_committed_public_values(&prefixed).expect("0x-prefixed hex should parse");
+
+        assert_eq!(external_id, "ext-abc");
+        assert_eq!(commitments.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_public_values_rejects_bad_hex() {
+        let err = parse_committed_public_values("zzzz").unwrap_err();
+        assert!(err.contains("hex decode failed"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_parse_public_values_rejects_truncated() {
+        // 10 bytes (< 32-byte intent_commitment header) encoded as hex.
+        let truncated = "00".repeat(10);
+        let err = parse_committed_public_values(&truncated).unwrap_err();
+        assert!(
+            err.contains("reading intent_commitment"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_require_amount_commitment_env() {
+        const VAR: &str = "ZPI_REQUIRE_AMOUNT_COMMITMENT";
+
+        let original = std::env::var(VAR).ok();
+
+        std::env::remove_var(VAR);
+        assert!(zpi_require_amount_commitment());
+
+        std::env::set_var(VAR, "false");
+        assert!(!zpi_require_amount_commitment());
+
+        std::env::set_var(VAR, "0");
+        assert!(!zpi_require_amount_commitment());
+
+        std::env::set_var(VAR, "true");
+        assert!(zpi_require_amount_commitment());
+
+        std::env::set_var(VAR, "1");
+        assert!(zpi_require_amount_commitment());
+
+        std::env::set_var(VAR, "FALSE");
+        assert!(!zpi_require_amount_commitment());
+
+        match original {
+            Some(v) => std::env::set_var(VAR, v),
+            None => std::env::remove_var(VAR),
+        }
+    }
+}
