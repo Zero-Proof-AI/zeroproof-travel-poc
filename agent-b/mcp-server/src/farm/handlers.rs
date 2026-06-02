@@ -1860,7 +1860,7 @@ pub async fn handle_pay_with_nevermined(
             "amount": format_dollars(amount_cents),
             "amount_cents": amount_cents,
             "merchant_url": req.merchant_url,
-            "instructions": "Merchant verified the ZPI proof and resolved the canonical proof_id. Now call zpi-zkpay's pay-with-nevermined-merchant-settles to mint the x402 token, then call this tool again with token_ref/x402_access_token + plan_id + external_id + proof_id to settle."
+            "instructions": "Merchant verified the ZPI proof. Now call zpi-zkpay pay-with-nevermined-merchant-settles Phase 2 (same external_id + proof_id) to mint — only after this INTENT_VERIFIED. Then call this tool again with token_ref + plan_id + external_id + proof_id to settle."
         }))));
     }
 
@@ -3238,7 +3238,7 @@ pub async fn handle_checkout(
                     "currency": "USD",
                     "description": format!("Farm order {}", order.order_id)
                 },
-                "instructions": "This external_id is a UUIDv4. Call chp_save, then prove_intent with this external_id and intent_type='spend' (save proof_id). Then: (1) call pay-with-nevermined with verify_only=true + external_id + proof_id so the merchant verifies the proof; (2) call zpi-zkpay's pay-with-nevermined-merchant-settles to mint; (3) call pay-with-nevermined with token_ref/x402_access_token + plan_id + external_id + proof_id to settle."
+                "instructions": "Canonical external_id for this payment — reuse in every step. (1) zpi-zkpay pay-with-nevermined-merchant-settles Phase 1: merchant_url + amount + this external_id (no proof_id). (2) chp_save, prove_intent(this external_id, intent_type=spend); poll zpi_get_zkp_status for proof_id if PENDING. (3) pay-with-nevermined verify_only=true + merchant_url + amount + description + external_id + proof_id. (4) zpi-zkpay merchant-settles Phase 2 with same ids to mint. (5) pay-with-nevermined settle with token_ref + plan_id + external_id + proof_id."
             }))),
         ));
     }
@@ -3713,7 +3713,7 @@ pub fn farm_tool_definitions() -> Vec<serde_json::Value> {
         }),
         json!({
             "name": "farm-checkout",
-            "description": "Checkout the cart. Supports x402 crypto, Nevermined card demo flow, or VGS card flow. x402 returns HTTP 402 payment challenge. nevermined_card returns NEEDS_INTENT_PROOF with a UUIDv4 external_id; preferred flow is verify (pay-with-nevermined verify_only=true + proof_id), mint (zpi-zkpay pay-with-nevermined-merchant-settles), settle (pay-with-nevermined with token_ref/x402_access_token + plan_id + external_id + proof_id). vgs_card returns a proof step and follow-up tool call.",
+            "description": "Checkout the cart. Supports x402 crypto, Nevermined card demo flow, or VGS card flow. x402 returns HTTP 402 payment challenge. nevermined_card returns NEEDS_INTENT_PROOF with a canonical UUIDv4 external_id; follow FARM_INSTRUCTIONS step 8 (zkpay Phase 1 seed → prove → merchant verify_only → zkpay Phase 2 mint → merchant settle). vgs_card returns a proof step and follow-up tool call.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -3938,20 +3938,19 @@ FARM MERCHANT INSTRUCTIONS:
 7. To purchase with Nevermined card demo flow, call farm-checkout with payment_method='nevermined_card'.
 8. For Nevermined flow (preferred — user's NVM API key stays inside ZPI-ZKPay):
     a. farm-checkout returns NEEDS_INTENT_PROOF with a UUIDv4 external_id and merchant_url.
-    b. Call chp_save, then prove_intent with that external_id and intent_type='spend'.
-       Remember proof_id from the response.
-    c. Call pay-with-nevermined (this merchant) with verify_only=true + merchant_url +
-       amount + description + external_id + proof_id. The merchant verifies the ZPI
-       proof against the attester and returns proof_id.
-    d. Call zpi-zkpay's pay-with-nevermined-merchant-settles with merchant_url + amount +
-       external_id + proof_id. ZPI-ZKPay confirms
-       the merchant verified this external_id (step c) before minting, then returns
-       token_ref, x402_access_token, payload_encoded, and payment_required
+       This external_id is canonical — use it in every later step; do not create another.
+    b. Call zpi-zkpay pay-with-nevermined-merchant-settles Phase 1 with merchant_url +
+       amount + that external_id (no proof_id). This seeds zkpay pending state.
+    c. Call chp_save, then prove_intent with the same external_id and intent_type='spend'.
+       Poll zpi_get_zkp_status until READY if prove returns PENDING; save proof_id.
+    d. Call pay-with-nevermined (this merchant) with verify_only=true + merchant_url +
+       amount + description + external_id + proof_id (no token). Wait for INTENT_VERIFIED.
+    e. Call zpi-zkpay pay-with-nevermined-merchant-settles Phase 2 with merchant_url +
+       amount + the same external_id + proof_id. ZPI-ZKPay confirms step (d) before minting,
+       then returns token_ref, x402_access_token, payload_encoded, and payment_required
        (accepts[0].planId is the planId).
-    e. Call pay-with-nevermined (this merchant) with merchant_url + amount + description +
-       token_ref (or x402_access_token) + plan_id (from payment_required.accepts[0].planId) +
-       external_id + proof_id. The merchant fetches the token from
-       ZPI-ZKPay over localhost, then calls Nevermined /verify and /settle itself.
+    f. Call pay-with-nevermined (this merchant) with merchant_url + amount + description +
+       token_ref (or x402_access_token) + plan_id + external_id + proof_id to settle.
     Legacy fallback: calling pay-with-nevermined with only zpi_proof + external_id still
     works for backward compatibility, but agent-b will mint the x402 token from its own
     NVM_API_KEY env var and log a warning. New demos should always use the chain above.
