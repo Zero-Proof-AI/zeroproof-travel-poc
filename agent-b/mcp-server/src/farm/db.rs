@@ -310,6 +310,14 @@ pub struct OrderRow {
     pub updated_at: String,
 }
 
+impl OrderRow {
+    pub fn public_proof_id(&self) -> Option<&str> {
+        self.attester_proof_id
+            .as_deref()
+            .or(self.zpi_proof_id.as_deref())
+    }
+}
+
 pub type SharedMerchantDb = Arc<MerchantDb>;
 
 /// Open the merchant DB at the default path (~/.agent-b/merchant.db) or AGENT_B_DB env var.

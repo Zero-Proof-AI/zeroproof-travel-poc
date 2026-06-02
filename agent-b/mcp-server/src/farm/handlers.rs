@@ -70,16 +70,9 @@ pub struct PayWithNeverminedRequest {
     pub external_id: Option<String>,
     #[serde(default)]
     pub zpi_proof: Option<String>,
-    /// zk-attestation `zkp_proof_id` (e.g. `zkp-…`) returned by zpi_generate_zkp.
-    /// When present, agent-b calls the attester's GET /proofs/{id}/verify
-    /// endpoint before touching Nevermined. Without it, the merchant cannot
-    /// independently validate the proof.
+    /// Canonical zk-attestation-service proof UUID returned by ZPI.
     #[serde(default)]
-    pub zpi_proof_id: Option<String>,
-    /// Canonical zk-attestation-service proof UUID. When ZPI-ZKPay returns this,
-    /// prefer it over the local `zkp-...` id to avoid external_id fallback.
-    #[serde(default)]
-    pub attester_proof_id: Option<String>,
+    pub proof_id: Option<String>,
     /// x402 access token minted by ZPI-ZKPay's `pay-with-nevermined-*` tool.
     /// When present, agent-b forwards it verbatim to Nevermined /verify and
     /// /settle instead of minting its own token from the user's NVM API key.
@@ -107,7 +100,7 @@ pub struct PayWithNeverminedRequest {
     /// Delta #5: when true, the merchant ONLY verifies the ZPI proof against
     /// the attester (Layer 1) and records the result for ZPI-ZKPay to confirm
     /// before it mints — no token is minted or settled on this call. Requires
-    /// `external_id` + `zpi_proof_id`.
+    /// `external_id` + `proof_id`.
     #[serde(default)]
     pub verify_only: Option<bool>,
 }
@@ -1049,6 +1042,13 @@ fn zpi_require_amount_commitment() -> bool {
     }
 }
 
+fn proof_id_from_request(req: &PayWithNeverminedRequest) -> Option<&str> {
+    req.proof_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
 /// Verify a ZPI proof against the zk-attestation-service (zero-trust).
 ///
 /// Before settling, the merchant pulls the proof from the attester and
@@ -1057,15 +1057,14 @@ fn zpi_require_amount_commitment() -> bool {
 /// valid proof for a *different* transaction — would pass the gate.
 ///
 /// Behaviour:
-///   * If `zpi_proof_id` is `None` or empty → returns Ok (soft-skip). We
+///   * If `proof_id` is `None` or empty → returns Ok (soft-skip). We
 ///     warn so the missing proof shows up in the log, but we don't block —
-///     existing demos that haven't been updated to pass `zpi_proof_id` keep
+///     existing demos that haven't been updated to pass `proof_id` keep
 ///     working.
 ///   * Otherwise, two steps:
 ///     1. **Liveness** — `GET /proofs/{id}/verify` confirms the proof exists
-///        and is fresh (≤ 5 min). If the supplied id 404s (the zpi-cli still
-///        fabricates a local `zkp-<uuid>` id), we resolve the attester's real
-///        UUID via `GET /proofs/session/{external_id}` and retry.
+///        and is fresh (≤ 5 min). If a supplied legacy id 404s, we resolve the
+///        attester's real UUID via `GET /proofs/session/{external_id}` and retry.
 ///     2. **Zero-trust binding** — `GET /proofs/{id}` returns the raw record;
 ///        we parse the SP1-committed `public_values` and independently assert
 ///        the committed `external_id` is *this* transaction and the committed
@@ -1077,16 +1076,16 @@ fn zpi_require_amount_commitment() -> bool {
 /// (that needs the SP1 verifier + program ELF embedded in the merchant);
 /// it verifies the proof's public-input bindings against the merchant record.
 async fn verify_zpi_proof_against_attester(
-    zpi_proof_id: Option<&str>,
+    proof_id: Option<&str>,
     external_id: &str,
     expected_amount_cents: u64,
     expected_merchant_url: &str,
 ) -> Result<String, String> {
-    let supplied_id = match zpi_proof_id.map(|s| s.trim()).filter(|s| !s.is_empty()) {
+    let supplied_id = match proof_id.map(|s| s.trim()).filter(|s| !s.is_empty()) {
         Some(id) => id,
         None => {
             tracing::warn!(
-                "[FARM-NVM][ZPI] No zpi_proof_id supplied for external_id={} amount_cents={} merchant_url={} — skipping attester verification. The merchant cannot independently verify the ZPI intent proof. Update ZPI-ZKPay to pass zpi_proof_id through.",
+                "[FARM-NVM][ZPI] No proof_id supplied for external_id={} amount_cents={} merchant_url={} — skipping attester verification. The merchant cannot independently verify the ZPI intent proof. Update ZPI-ZKPay to pass proof_id through.",
                 external_id,
                 expected_amount_cents,
                 expected_merchant_url
@@ -1105,7 +1104,7 @@ async fn verify_zpi_proof_against_attester(
     // does a 5-minute freshness check + `verified` flag). This is a liveness
     // gate only; the authoritative checks happen in step 2 against the
     // committed public values. We still resolve through the existing
-    // `zkp-<uuid>` → attester-UUID fallback so older zpi-cli builds work.
+    // legacy-ID → attester-UUID fallback so older flows work.
     let verified_proof_id = match verify_attester_proof_by_id(&client, &attester_url, supplied_id)
         .await
     {
@@ -1120,9 +1119,9 @@ async fn verify_zpi_proof_against_attester(
         }
         AttesterVerifyOutcome::NotFound => {
             tracing::warn!(
-                "[FARM-NVM][ZPI] supplied zpi_proof_id={} not recognised by the attester — \
+                "[FARM-NVM][ZPI] supplied proof_id={} not recognised by the attester — \
                  falling back to lookup by external_id={}. This usually means the zpi-cli \
-                 returned its local `zkp-<uuid>` id rather than the attester's UUID.",
+                 returned a legacy local id rather than the attester's UUID.",
                 supplied_id,
                 external_id
             );
@@ -1755,8 +1754,7 @@ pub async fn handle_intent_verified(
                 "external_id": external_id,
                 "amount_cents": v.amount_cents,
                 "merchant_url": v.merchant_url,
-                "zpi_proof_id": v.zpi_proof_id,
-                "attester_proof_id": v.attester_proof_id,
+                "proof_id": v.proof_id,
                 "verified_at_secs": verified_at_secs,
             }))
         }
@@ -1804,26 +1802,27 @@ pub async fn handle_pay_with_nevermined(
                 )),
             )
         })?;
-        let proof_id_present = req
-            .zpi_proof_id
-            .as_deref()
-            .map(|s| !s.trim().is_empty())
-            .unwrap_or(false);
-        if !proof_id_present {
+        let supplied_proof_id = proof_id_from_request(&req).ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(FarmToolResponse::err(
+                    400,
+                    "proof_id is required for verify_only so the merchant can verify the proof against the attester".to_string(),
+                )),
+            )
+        })?;
+        if supplied_proof_id.is_empty() {
             return Err((
                 StatusCode::BAD_REQUEST,
                 Json(FarmToolResponse::err(
                     400,
-                    "zpi_proof_id is required for verify_only so the merchant can verify the proof against the attester".to_string(),
+                    "proof_id is required for verify_only so the merchant can verify the proof against the attester".to_string(),
                 )),
             ));
         }
 
-        let supplied_zpi_proof_id = req.zpi_proof_id.clone().unwrap_or_default();
-        let canonical_attester_proof_id = verify_zpi_proof_against_attester(
-            req.attester_proof_id
-                .as_deref()
-                .or(req.zpi_proof_id.as_deref()),
+        let canonical_proof_id = verify_zpi_proof_against_attester(
+            Some(supplied_proof_id),
             &external_id,
             amount_cents,
             &req.merchant_url,
@@ -1842,8 +1841,7 @@ pub async fn handle_pay_with_nevermined(
                 super::state::VerifiedIntent {
                     amount_cents,
                     merchant_url: req.merchant_url.clone(),
-                    zpi_proof_id: supplied_zpi_proof_id.clone(),
-                    attester_proof_id: canonical_attester_proof_id.clone(),
+                    proof_id: canonical_proof_id.clone(),
                     verified_at: std::time::SystemTime::now(),
                 },
             );
@@ -1858,18 +1856,17 @@ pub async fn handle_pay_with_nevermined(
         return Ok(Json(FarmToolResponse::ok(json!({
             "status": "INTENT_VERIFIED",
             "external_id": external_id,
-            "zpi_proof_id": supplied_zpi_proof_id,
-            "attester_proof_id": canonical_attester_proof_id,
+            "proof_id": canonical_proof_id,
             "amount": format_dollars(amount_cents),
             "amount_cents": amount_cents,
             "merchant_url": req.merchant_url,
-            "instructions": "Merchant verified the ZPI proof and resolved the canonical attester_proof_id. Now call zpi-zkpay's pay-with-nevermined-merchant-settles to mint the x402 token, then call this tool again with token_ref/x402_access_token + plan_id + external_id + zpi_proof_id + attester_proof_id to settle."
+            "instructions": "Merchant verified the ZPI proof and resolved the canonical proof_id. Now call zpi-zkpay's pay-with-nevermined-merchant-settles to mint the x402 token, then call this tool again with token_ref/x402_access_token + plan_id + external_id + proof_id to settle."
         }))));
     }
 
     // The preferred flow has Claude forward an x402_access_token that ZPI-ZKPay
     // already minted on the user's behalf. In that case the raw zpi_proof bytes
-    // are not required — the proof's validity is established by zpi_proof_id
+    // are not required — the proof's validity is established by proof_id
     // against the attester. The legacy flow still requires the bytes so this
     // handler can stash pending state and mint locally using NVM_API_KEY.
     let has_supplied_token = req
@@ -1912,7 +1909,7 @@ pub async fn handle_pay_with_nevermined(
                 "description": req.description,
                 "payment_processor": "nevermined"
             },
-            "instructions": "PREFERRED FLOW: call this tool with verify_only=true + external_id + zpi_proof_id so the merchant resolves attester_proof_id, then call zpi-zkpay's pay-with-nevermined-merchant-settles (it mints the x402 token on the user's behalf without leaking the user's NVM API key to the merchant), then call this tool with token_ref/x402_access_token + plan_id + external_id + zpi_proof_id + attester_proof_id. LEGACY: call chp_save, then prove_intent with this external_id and intent_type='spend', then call pay-with-nevermined again with zpi_proof + external_id (this minted token will come from the merchant's own NVM_API_KEY)."
+            "instructions": "PREFERRED FLOW: call chp_save, then prove_intent with this external_id and intent_type='spend'. Call this tool with verify_only=true + external_id + proof_id so the merchant verifies the proof, then call zpi-zkpay's pay-with-nevermined-merchant-settles, then call this tool with token_ref/x402_access_token + plan_id + external_id + proof_id. LEGACY: call pay-with-nevermined again with zpi_proof + external_id (this minted token will come from the merchant's own NVM_API_KEY)."
         }))));
     }
 
@@ -1982,30 +1979,24 @@ pub async fn handle_pay_with_nevermined(
     }
 
     // ── Phase 2a — verify the ZPI proof against the attester ──────────────
-    // In the preferred flow zpi_proof_id is mandatory — the whole point is
+    // In the preferred flow proof_id is mandatory — the whole point is
     // that the merchant verifies the proof itself rather than trusting Claude
     // or ZPI-ZKPay blindly. In the legacy flow we soft-skip if it's missing
     // so older demos still work (with a visible warning emitted downstream).
-    let zpi_proof_id_present = req
-        .zpi_proof_id
-        .as_deref()
-        .map(|s| !s.trim().is_empty())
-        .unwrap_or(false);
+    let supplied_proof_id = proof_id_from_request(&req);
 
-    if has_supplied_token && !zpi_proof_id_present {
+    if has_supplied_token && supplied_proof_id.is_none() {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(FarmToolResponse::err(
                 400,
-                "zpi_proof_id is required when x402_access_token/token_ref is supplied so the merchant can verify the ZPI intent proof against the attester".to_string(),
+                "proof_id is required when x402_access_token/token_ref is supplied so the merchant can verify the ZPI intent proof against the attester".to_string(),
             )),
         ));
     }
 
-    let canonical_attester_proof_id = verify_zpi_proof_against_attester(
-        req.attester_proof_id
-            .as_deref()
-            .or(req.zpi_proof_id.as_deref()),
+    let canonical_proof_id = verify_zpi_proof_against_attester(
+        supplied_proof_id,
         &external_id,
         amount_cents,
         &req.merchant_url,
@@ -2224,11 +2215,8 @@ pub async fn handle_pay_with_nevermined(
         .header("X-Nevermined-Access-Token", &payment_credential)
         .header("X-Expected-Amount-Cents", amount_cents.to_string())
         .header("X-ZPI-External-Id", &external_id);
-    if let Some(zpi_proof_id) = req.zpi_proof_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        merchant_req = merchant_req.header("X-ZPI-Proof-Id", zpi_proof_id);
-    }
-    if !canonical_attester_proof_id.is_empty() {
-        merchant_req = merchant_req.header("X-ZPI-Attester-Proof-Id", &canonical_attester_proof_id);
+    if !canonical_proof_id.is_empty() {
+        merchant_req = merchant_req.header("X-ZPI-Proof-Id", &canonical_proof_id);
     }
     if !x_nevermined_api_key.is_empty() {
         // Only forward the merchant-side key on the legacy path so the
@@ -2270,8 +2258,7 @@ pub async fn handle_pay_with_nevermined(
         "status": "PAID",
         "payment_processor": "nevermined",
         "external_id": external_id,
-        "zpi_proof_id": req.zpi_proof_id,
-        "attester_proof_id": canonical_attester_proof_id,
+        "proof_id": canonical_proof_id,
         "merchant_response": serde_json::from_str::<serde_json::Value>(&text).unwrap_or(json!({"raw": text}))
     }))))
 }
@@ -3251,7 +3238,7 @@ pub async fn handle_checkout(
                     "currency": "USD",
                     "description": format!("Farm order {}", order.order_id)
                 },
-                "instructions": "This external_id is a UUIDv4. Call chp_save, then prove_intent with this external_id and intent_type='spend' (save zkp_proof_id). Then: (1) call pay-with-nevermined with verify_only=true + external_id + zpi_proof_id so the merchant verifies the proof and returns attester_proof_id; (2) call zpi-zkpay's pay-with-nevermined-merchant-settles to mint; (3) call pay-with-nevermined with token_ref/x402_access_token + plan_id + external_id + zpi_proof_id + attester_proof_id to settle."
+                "instructions": "This external_id is a UUIDv4. Call chp_save, then prove_intent with this external_id and intent_type='spend' (save proof_id). Then: (1) call pay-with-nevermined with verify_only=true + external_id + proof_id so the merchant verifies the proof; (2) call zpi-zkpay's pay-with-nevermined-merchant-settles to mint; (3) call pay-with-nevermined with token_ref/x402_access_token + plan_id + external_id + proof_id to settle."
             }))),
         ));
     }
@@ -3483,15 +3470,16 @@ pub async fn handle_checkout_nevermined(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())
         .filter(|s| !s.trim().is_empty());
-    let zpi_proof_id_header = headers
+    let proof_id_header = headers
         .get("x-zpi-proof-id")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())
-        .filter(|s| !s.trim().is_empty());
-    let attester_proof_id_header = headers
-        .get("x-zpi-attester-proof-id")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
+        .or_else(|| {
+            headers
+                .get("x-zpi-attester-proof-id")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string())
+        })
         .filter(|s| !s.trim().is_empty());
 
     // X-Nevermined-Plan-Id is forwarded by pay-with-nevermined when ZPI-ZKPay
@@ -3594,8 +3582,8 @@ pub async fn handle_checkout_nevermined(
     if let Err(e) = db.update_order_zpi_audit(
         &order_id,
         external_id_header.as_deref(),
-        zpi_proof_id_header.as_deref(),
-        attester_proof_id_header.as_deref(),
+        None,
+        proof_id_header.as_deref(),
     ) {
         tracing::error!("[FARM-NVM] Failed to persist ZPI audit IDs for {}: {}", order_id, e);
     }
@@ -3607,8 +3595,7 @@ pub async fn handle_checkout_nevermined(
         "network": "nevermined-card",
         "tx_hash": tx_hash,
         "external_id": external_id_header,
-        "zpi_proof_id": zpi_proof_id_header,
-        "attester_proof_id": attester_proof_id_header,
+        "proof_id": proof_id_header,
         "total": format_dollars(order.total_cents),
     })))
 }
@@ -3726,7 +3713,7 @@ pub fn farm_tool_definitions() -> Vec<serde_json::Value> {
         }),
         json!({
             "name": "farm-checkout",
-            "description": "Checkout the cart. Supports x402 crypto, Nevermined card demo flow, or VGS card flow. x402 returns HTTP 402 payment challenge. nevermined_card returns NEEDS_INTENT_PROOF with a UUIDv4 external_id; preferred flow is verify (pay-with-nevermined verify_only=true → attester_proof_id), mint (zpi-zkpay pay-with-nevermined-merchant-settles), settle (pay-with-nevermined with token_ref/x402_access_token + plan_id + external_id + zpi_proof_id + attester_proof_id). vgs_card returns a proof step and follow-up tool call.",
+            "description": "Checkout the cart. Supports x402 crypto, Nevermined card demo flow, or VGS card flow. x402 returns HTTP 402 payment challenge. nevermined_card returns NEEDS_INTENT_PROOF with a UUIDv4 external_id; preferred flow is verify (pay-with-nevermined verify_only=true + proof_id), mint (zpi-zkpay pay-with-nevermined-merchant-settles), settle (pay-with-nevermined with token_ref/x402_access_token + plan_id + external_id + proof_id). vgs_card returns a proof step and follow-up tool call.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -3837,7 +3824,7 @@ pub fn farm_tool_definitions() -> Vec<serde_json::Value> {
         }),
         json!({
             "name": "pay-with-nevermined",
-            "description": "Complete a Nevermined card payment. PREFERRED FLOW: (1) call this tool with verify_only=true + external_id + zpi_proof_id so the merchant verifies the ZPI proof against the attester FIRST and returns attester_proof_id; (2) call zpi-zkpay's pay-with-nevermined-merchant-settles to mint the x402 token (it confirms this merchant verification before minting); (3) call this tool with token_ref/x402_access_token + plan_id + external_id + zpi_proof_id + attester_proof_id to settle. The merchant fetches the real token from ZPI-ZKPay over localhost (avoiding corruption). LEGACY FLOW: first call without zpi_proof returns NEEDS_INTENT_PROOF; second call with external_id + zpi_proof mints internally using the merchant's NVM_API_KEY env var.",
+            "description": "Complete a Nevermined card payment. PREFERRED FLOW: (1) call this tool with verify_only=true + external_id + proof_id so the merchant verifies the ZPI proof against the attester FIRST; (2) call zpi-zkpay's pay-with-nevermined-merchant-settles to mint the x402 token (it confirms this merchant verification before minting); (3) call this tool with token_ref/x402_access_token + plan_id + external_id + proof_id to settle. The merchant fetches the real token from ZPI-ZKPay over localhost (avoiding corruption). LEGACY FLOW: first call without zpi_proof returns NEEDS_INTENT_PROOF; second call with external_id + zpi_proof mints internally using the merchant's NVM_API_KEY env var.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -3861,13 +3848,9 @@ pub fn farm_tool_definitions() -> Vec<serde_json::Value> {
                         "type": "string",
                         "description": "ZPI proof blob/string from prove_intent. Required for legacy mint flow only."
                     },
-                    "zpi_proof_id": {
+                    "proof_id": {
                         "type": "string",
-                        "description": "zkp_proof_id from prove_intent. When supplied, the merchant pulls the proof from the attester (GET /proofs/{id}/verify) and rejects the payment if invalid."
-                    },
-                    "attester_proof_id": {
-                        "type": "string",
-                        "description": "Canonical proof UUID stored by zk-attestation-service. Required on the final settle call; returned by verify_only=true (step 1) or zpi-zkpay merchant-settles."
+                        "description": "Canonical proof_id from prove_intent. When supplied, the merchant pulls the proof from the attester (GET /proofs/{id}/verify) and rejects the payment if invalid."
                     },
                     "x402_access_token": {
                         "type": "string",
@@ -3887,7 +3870,7 @@ pub fn farm_tool_definitions() -> Vec<serde_json::Value> {
                     },
                     "verify_only": {
                         "type": "boolean",
-                        "description": "When true, the merchant ONLY verifies the ZPI proof against the attester and records the result (no mint, no settle). Requires external_id + zpi_proof_id. Returns attester_proof_id. Call this BEFORE asking zpi-zkpay to mint — zpi-zkpay confirms this verification before minting."
+                        "description": "When true, the merchant ONLY verifies the ZPI proof against the attester and records the result (no mint, no settle). Requires external_id + proof_id. Returns proof_id. Call this BEFORE asking zpi-zkpay to mint — zpi-zkpay confirms this verification before minting."
                     }
                 },
                 "required": ["merchant_url", "amount", "description"]
@@ -3956,18 +3939,18 @@ FARM MERCHANT INSTRUCTIONS:
 8. For Nevermined flow (preferred — user's NVM API key stays inside ZPI-ZKPay):
     a. farm-checkout returns NEEDS_INTENT_PROOF with a UUIDv4 external_id and merchant_url.
     b. Call chp_save, then prove_intent with that external_id and intent_type='spend'.
-       Remember zkp_proof_id from the response.
+       Remember proof_id from the response.
     c. Call pay-with-nevermined (this merchant) with verify_only=true + merchant_url +
-       amount + description + external_id + zpi_proof_id. The merchant verifies the ZPI
-       proof against the attester and returns attester_proof_id.
+       amount + description + external_id + proof_id. The merchant verifies the ZPI
+       proof against the attester and returns proof_id.
     d. Call zpi-zkpay's pay-with-nevermined-merchant-settles with merchant_url + amount +
-       external_id + zpi_proof + zpi_proof_id + attester_proof_id. ZPI-ZKPay confirms
+       external_id + proof_id. ZPI-ZKPay confirms
        the merchant verified this external_id (step c) before minting, then returns
        token_ref, x402_access_token, payload_encoded, and payment_required
        (accepts[0].planId is the planId).
     e. Call pay-with-nevermined (this merchant) with merchant_url + amount + description +
        token_ref (or x402_access_token) + plan_id (from payment_required.accepts[0].planId) +
-       external_id + zpi_proof_id + attester_proof_id. The merchant fetches the token from
+       external_id + proof_id. The merchant fetches the token from
        ZPI-ZKPay over localhost, then calls Nevermined /verify and /settle itself.
     Legacy fallback: calling pay-with-nevermined with only zpi_proof + external_id still
     works for backward compatibility, but agent-b will mint the x402 token from its own
@@ -4197,6 +4180,8 @@ pub async fn handle_list_orders(
                         "payment_method": r.payment_method,
                         "tx_hash": r.tx_hash,
                         "network": r.network,
+                        "external_id": r.external_id,
+                        "proof_id": r.public_proof_id(),
                         "created_at": r.created_at,
                         "updated_at": r.updated_at,
                     })
@@ -4861,8 +4846,7 @@ mod attester_http_tests {
                 crate::farm::state::VerifiedIntent {
                     amount_cents: 4321,
                     merchant_url: "https://merchant.example".into(),
-                    zpi_proof_id: "zkp-known".into(),
-                    attester_proof_id: "attester-known".into(),
+                    proof_id: "attester-known".into(),
                     verified_at: std::time::SystemTime::now(),
                 },
             );
@@ -4878,8 +4862,7 @@ mod attester_http_tests {
         assert_eq!(resp["external_id"], "known-ext");
         assert_eq!(resp["amount_cents"], 4321);
         assert_eq!(resp["merchant_url"], "https://merchant.example");
-        assert_eq!(resp["zpi_proof_id"], "zkp-known");
-        assert_eq!(resp["attester_proof_id"], "attester-known");
+        assert_eq!(resp["proof_id"], "attester-known");
         assert!(resp.get("verified_at_secs").is_some());
     }
 
