@@ -4293,3 +4293,545 @@ mod nvm_zpi_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod attester_http_tests {
+    use super::*;
+    use axum::{
+        extract::{Path, Query},
+        routing::get,
+        Router,
+    };
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    /// Bind an ephemeral mock attester and return its base URL (`http://127.0.0.1:PORT`).
+    async fn spawn_mock_attester(app: Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    fn commitment_hex_to_bytes(hex_str: &str) -> [u8; 32] {
+        let bytes = hex::decode(hex_str).unwrap();
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        arr
+    }
+
+    /// Build SP1 public_values hex matching `parse_committed_public_values`.
+    fn build_public_values_hex(external_id: &str, field_pairs: Vec<(String, [u8; 32])>) -> String {
+        let mut bytes = vec![0u8; 32];
+        bytes.extend(bincode::serialize(&3u32).unwrap());
+        bytes.extend(bincode::serialize(&external_id.to_string()).unwrap());
+        bytes.extend(bincode::serialize(&field_pairs).unwrap());
+        hex::encode(bytes)
+    }
+
+    fn build_bound_public_values(
+        external_id: &str,
+        amount_cents: u64,
+        salt: &str,
+    ) -> (String, String) {
+        let program_id = "sha256:deadbeef".to_string();
+        let amount_hex = compute_field_commitment(
+            "total_amount",
+            &amount_cents.to_string(),
+            external_id,
+            salt,
+        );
+        let amount_bytes = commitment_hex_to_bytes(&amount_hex);
+        let public_values_hex =
+            build_public_values_hex(external_id, vec![("total_amount".to_string(), amount_bytes)]);
+        (public_values_hex, program_id)
+    }
+
+    #[derive(Deserialize)]
+    struct DeriveSaltQuery {
+        external_id: String,
+    }
+
+    #[tokio::test]
+    async fn test_verify_attester_proof_by_id_ok() {
+        let app = Router::new().route(
+            "/proofs/:id/verify",
+            get(|Path(id): Path<String>| async move {
+                Json(json!({
+                    "success": true,
+                    "data": { "proof": { "session_id": format!("sess-{id}") } }
+                }))
+            }),
+        );
+        let base = spawn_mock_attester(app).await;
+        let client = reqwest::Client::new();
+
+        match verify_attester_proof_by_id(&client, &base, "proof-1").await {
+            AttesterVerifyOutcome::Ok { session_id } => {
+                assert_eq!(session_id.as_deref(), Some("sess-proof-1"));
+            }
+            _other => panic!("expected Ok, got unexpected AttesterVerifyOutcome variant"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_verify_attester_proof_by_id_not_found_404() {
+        let app = Router::new().route(
+            "/proofs/:id/verify",
+            get(|_: Path<String>| async { StatusCode::NOT_FOUND }),
+        );
+        let base = spawn_mock_attester(app).await;
+        let client = reqwest::Client::new();
+
+        assert!(matches!(
+            verify_attester_proof_by_id(&client, &base, "missing").await,
+            AttesterVerifyOutcome::NotFound
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_verify_attester_proof_by_id_failed_success_false() {
+        let app = Router::new().route(
+            "/proofs/:id/verify",
+            get(|_: Path<String>| async move {
+                Json(json!({ "success": false, "error": "proof stale or unverified" }))
+            }),
+        );
+        let base = spawn_mock_attester(app).await;
+        let client = reqwest::Client::new();
+
+        match verify_attester_proof_by_id(&client, &base, "stale").await {
+            AttesterVerifyOutcome::Failed(msg) => {
+                assert!(msg.contains("proof verification failed"));
+                assert!(msg.contains("proof stale or unverified"));
+            }
+            _ => panic!("expected Failed AttesterVerifyOutcome variant"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_verify_attester_proof_by_id_failed_http_500() {
+        let app = Router::new().route(
+            "/proofs/:id/verify",
+            get(|_: Path<String>| async { StatusCode::INTERNAL_SERVER_ERROR }),
+        );
+        let base = spawn_mock_attester(app).await;
+        let client = reqwest::Client::new();
+
+        match verify_attester_proof_by_id(&client, &base, "boom").await {
+            AttesterVerifyOutcome::Failed(msg) => {
+                assert!(msg.contains("attester returned HTTP 500"));
+            }
+            _ => panic!("expected Failed AttesterVerifyOutcome variant"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resolve_attester_proof_id_by_external_id_ok() {
+        let app = Router::new().route(
+            "/proofs/session/:external_id",
+            get(|Path(external_id): Path<String>| async move {
+                Json(json!({
+                    "proofs": [
+                        {
+                            "proof_id": "older-id",
+                            "tool_name": "attest",
+                            "timestamp": 1
+                        },
+                        {
+                            "proof_id": format!("resolved-{external_id}"),
+                            "tool_name": "attest",
+                            "timestamp": 99
+                        }
+                    ]
+                }))
+            }),
+        );
+        let base = spawn_mock_attester(app).await;
+        let client = reqwest::Client::new();
+
+        let resolved =
+            resolve_attester_proof_id_by_external_id(&client, &base, "ext-abc")
+                .await
+                .expect("should resolve proof id");
+        assert_eq!(resolved, "resolved-ext-abc");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_attester_proof_id_by_external_id_empty_proofs() {
+        let app = Router::new().route(
+            "/proofs/session/:external_id",
+            get(|_: Path<String>| async move { Json(json!({ "proofs": [] })) }),
+        );
+        let base = spawn_mock_attester(app).await;
+        let client = reqwest::Client::new();
+
+        let err = resolve_attester_proof_id_by_external_id(&client, &base, "ext-empty")
+            .await
+            .unwrap_err();
+        assert!(err.contains("no proofs found at attester"));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_proof_material_by_id_ok() {
+        let app = Router::new().route(
+            "/proofs/:id",
+            get(|Path(_id): Path<String>| async move {
+                Json(json!({
+                    "success": true,
+                    "data": {
+                        "proof": {
+                            "proof": {
+                                "public_values": "abc123",
+                                "vk_hash": "vk-deadbeef",
+                                "program_id": "sha256:cafebabe",
+                                "field_commitments": [
+                                    { "field": "total_amount", "commitment": "ff" }
+                                ]
+                            }
+                        }
+                    }
+                }))
+            }),
+        );
+        let base = spawn_mock_attester(app).await;
+        let client = reqwest::Client::new();
+
+        let material = fetch_proof_material_by_id(&client, &base, "proof-42")
+            .await
+            .expect("fetch should succeed")
+            .expect("proof should exist");
+
+        assert_eq!(material.public_values_hex, "abc123");
+        assert_eq!(material.vk_hash.as_deref(), Some("vk-deadbeef"));
+        assert_eq!(material.program_id.as_deref(), Some("sha256:cafebabe"));
+        assert!(material.field_commitments_meta.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_fetch_proof_material_by_id_not_found() {
+        let app = Router::new().route(
+            "/proofs/:id",
+            get(|_: Path<String>| async { StatusCode::NOT_FOUND }),
+        );
+        let base = spawn_mock_attester(app).await;
+        let client = reqwest::Client::new();
+
+        let result = fetch_proof_material_by_id(&client, &base, "missing")
+            .await
+            .expect("transport ok");
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_derive_salt_from_attester_ok_encodes_program_id() {
+        let encoded_hit = Arc::new(Mutex::new(false));
+        let decoded_hit = Arc::new(Mutex::new(false));
+        let encoded_hit_clone = encoded_hit.clone();
+        let decoded_hit_clone = decoded_hit.clone();
+        let captured_external = Arc::new(Mutex::new(String::new()));
+        let captured_external_clone = captured_external.clone();
+
+        let app = Router::new()
+            .route(
+                "/programs/sha256%3Adeadbeef/derive-salt",
+                get({
+                    let encoded_hit = encoded_hit_clone;
+                    let captured_external = captured_external_clone;
+                    move |Query(q): Query<DeriveSaltQuery>| {
+                        let encoded_hit = encoded_hit.clone();
+                        let captured_external = captured_external.clone();
+                        async move {
+                            *encoded_hit.lock().unwrap() = true;
+                            *captured_external.lock().unwrap() = q.external_id;
+                            Json(json!({ "derived_salt": "cafebabe" }))
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/programs/sha256:deadbeef/derive-salt",
+                get({
+                    let decoded_hit = decoded_hit_clone;
+                    move || {
+                        let decoded_hit = decoded_hit.clone();
+                        async move {
+                            *decoded_hit.lock().unwrap() = true;
+                            Json(json!({ "derived_salt": "wrong-route" }))
+                        }
+                    }
+                }),
+            );
+        let base = spawn_mock_attester(app).await;
+        let client = reqwest::Client::new();
+
+        let salt = derive_salt_from_attester(
+            &client,
+            &base,
+            "sha256:deadbeef",
+            "ext-derive",
+        )
+        .await
+        .expect("derive-salt should succeed");
+        assert_eq!(salt, "cafebabe");
+        assert!(*encoded_hit.lock().unwrap(), "expected percent-encoded program_id route");
+        assert!(
+            !*decoded_hit.lock().unwrap(),
+            "must not hit decoded-colon route (would break content-addressed ids)"
+        );
+        assert_eq!(captured_external.lock().unwrap().as_str(), "ext-derive");
+    }
+
+    #[tokio::test]
+    async fn test_derive_salt_from_attester_http_error() {
+        let app = Router::new().route(
+            "/programs/:program_id/derive-salt",
+            get(|_: Path<String>, _: Query<DeriveSaltQuery>| async {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }),
+        );
+        let base = spawn_mock_attester(app).await;
+        let client = reqwest::Client::new();
+
+        let err = derive_salt_from_attester(&client, &base, "sha256:x", "ext-1")
+            .await
+            .unwrap_err();
+        assert!(err.contains("derive-salt returned HTTP 500"));
+    }
+
+    #[tokio::test]
+    async fn test_derive_salt_from_attester_missing_field() {
+        let app = Router::new().route(
+            "/programs/:program_id/derive-salt",
+            get(|_: Path<String>, _: Query<DeriveSaltQuery>| async move {
+                Json(json!({ "unexpected": true }))
+            }),
+        );
+        let base = spawn_mock_attester(app).await;
+        let client = reqwest::Client::new();
+
+        let err = derive_salt_from_attester(&client, &base, "sha256:x", "ext-1")
+            .await
+            .unwrap_err();
+        assert!(err.contains("derive-salt response missing `derived_salt`"));
+    }
+
+    #[tokio::test]
+    async fn test_run_zero_trust_proof_checks_happy_path() {
+        const EXTERNAL_ID: &str = "ext-bind-ok";
+        const AMOUNT_CENTS: u64 = 2500;
+        const SALT: &str = "salthex123";
+
+        let (public_values_hex, program_id) =
+            build_bound_public_values(EXTERNAL_ID, AMOUNT_CENTS, SALT);
+        let material = ProofMaterial {
+            public_values_hex,
+            vk_hash: None,
+            program_id: Some(program_id),
+            field_commitments_meta: None,
+        };
+
+        let app = Router::new().route(
+            "/programs/:program_id/derive-salt",
+            get(|_: Path<String>, Query(q): Query<DeriveSaltQuery>| async move {
+                assert_eq!(q.external_id, EXTERNAL_ID);
+                Json(json!({ "derived_salt": SALT }))
+            }),
+        );
+        let base = spawn_mock_attester(app).await;
+        let client = reqwest::Client::new();
+
+        run_zero_trust_proof_checks(
+            &client,
+            &base,
+            &material,
+            EXTERNAL_ID,
+            AMOUNT_CENTS,
+        )
+        .await
+        .expect("happy path should pass");
+    }
+
+    #[tokio::test]
+    async fn test_run_zero_trust_proof_checks_amount_tamper() {
+        const EXTERNAL_ID: &str = "ext-tamper";
+        const AMOUNT_CENTS: u64 = 500;
+        const SALT: &str = "good-salt";
+
+        let (mut public_values_hex, program_id) =
+            build_bound_public_values(EXTERNAL_ID, AMOUNT_CENTS, SALT);
+        // Flip one hex nibble so the committed total_amount no longer matches recompute.
+        public_values_hex.pop();
+        public_values_hex.push('0');
+
+        let material = ProofMaterial {
+            public_values_hex,
+            vk_hash: None,
+            program_id: Some(program_id),
+            field_commitments_meta: None,
+        };
+
+        let app = Router::new().route(
+            "/programs/:program_id/derive-salt",
+            get(|_: Path<String>, _: Query<DeriveSaltQuery>| async move {
+                Json(json!({ "derived_salt": SALT }))
+            }),
+        );
+        let base = spawn_mock_attester(app).await;
+        let client = reqwest::Client::new();
+
+        let err = run_zero_trust_proof_checks(
+            &client,
+            &base,
+            &material,
+            EXTERNAL_ID,
+            AMOUNT_CENTS,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("amount binding FAILED"));
+    }
+
+    #[tokio::test]
+    async fn test_run_zero_trust_proof_checks_external_id_mismatch() {
+        const COMMITTED_ID: &str = "ext-committed";
+        const SETTLING_ID: &str = "ext-settling";
+        const AMOUNT_CENTS: u64 = 100;
+        const SALT: &str = "salt";
+
+        let (public_values_hex, program_id) =
+            build_bound_public_values(COMMITTED_ID, AMOUNT_CENTS, SALT);
+        let material = ProofMaterial {
+            public_values_hex,
+            vk_hash: None,
+            program_id: Some(program_id),
+            field_commitments_meta: None,
+        };
+
+        let app = Router::new().route(
+            "/programs/:program_id/derive-salt",
+            get(|_: Path<String>, _: Query<DeriveSaltQuery>| async move {
+                Json(json!({ "derived_salt": SALT }))
+            }),
+        );
+        let base = spawn_mock_attester(app).await;
+        let client = reqwest::Client::new();
+
+        let err = run_zero_trust_proof_checks(
+            &client,
+            &base,
+            &material,
+            SETTLING_ID,
+            AMOUNT_CENTS,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("external_id binding FAILED"));
+    }
+
+    #[tokio::test]
+    async fn test_run_zero_trust_proof_checks_missing_total_amount_required() {
+        static ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = ENV_TEST_LOCK.lock().unwrap();
+        const VAR: &str = "ZPI_REQUIRE_AMOUNT_COMMITMENT";
+        let original = std::env::var(VAR).ok();
+        std::env::remove_var(VAR);
+        assert!(zpi_require_amount_commitment());
+
+        const EXTERNAL_ID: &str = "ext-no-amount";
+
+        let public_values_hex = build_public_values_hex(
+            EXTERNAL_ID,
+            vec![("currency".to_string(), [1u8; 32])],
+        );
+        let material = ProofMaterial {
+            public_values_hex,
+            vk_hash: None,
+            program_id: Some("sha256:abc".into()),
+            field_commitments_meta: None,
+        };
+
+        let base = spawn_mock_attester(Router::new()).await;
+        let client = reqwest::Client::new();
+
+        let err = run_zero_trust_proof_checks(
+            &client,
+            &base,
+            &material,
+            EXTERNAL_ID,
+            999,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("does not commit a `total_amount` field"));
+
+        match original {
+            Some(v) => std::env::set_var(VAR, v),
+            None => std::env::remove_var(VAR),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_intent_verified_known_external_id() {
+        let state = crate::farm::state::new_shared_state();
+        {
+            let mut s = state.write().await;
+            s.verified_intents.insert(
+                "known-ext".into(),
+                crate::farm::state::VerifiedIntent {
+                    amount_cents: 4321,
+                    merchant_url: "https://merchant.example".into(),
+                    verified_at: std::time::SystemTime::now(),
+                },
+            );
+        }
+
+        let mut params = HashMap::new();
+        params.insert("external_id".to_string(), "known-ext".to_string());
+
+        let Json(resp) =
+            handle_intent_verified(axum::extract::State(state), axum::extract::Query(params)).await;
+
+        assert_eq!(resp["verified"], true);
+        assert_eq!(resp["external_id"], "known-ext");
+        assert_eq!(resp["amount_cents"], 4321);
+        assert_eq!(resp["merchant_url"], "https://merchant.example");
+        assert!(resp.get("verified_at_secs").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_handle_intent_verified_unknown_external_id() {
+        let state = crate::farm::state::new_shared_state();
+        let mut params = HashMap::new();
+        params.insert("external_id".to_string(), "missing-ext".to_string());
+
+        let Json(resp) =
+            handle_intent_verified(axum::extract::State(state), axum::extract::Query(params)).await;
+
+        assert_eq!(resp["verified"], false);
+        assert_eq!(resp["external_id"], "missing-ext");
+        assert!(resp["reason"]
+            .as_str()
+            .unwrap_or("")
+            .contains("no merchant verification on record"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_intent_verified_empty_external_id() {
+        let state = crate::farm::state::new_shared_state();
+        let params = HashMap::new();
+
+        let Json(resp) =
+            handle_intent_verified(axum::extract::State(state), axum::extract::Query(params)).await;
+
+        assert_eq!(resp["verified"], false);
+        assert!(resp["reason"]
+            .as_str()
+            .unwrap_or("")
+            .contains("external_id query param required"));
+    }
+}
