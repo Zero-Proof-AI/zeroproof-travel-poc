@@ -1014,25 +1014,33 @@ fn default_zpi_attester_url() -> String {
     std::env::var("ZPI_ATTESTER_URL").unwrap_or_else(|_| "http://localhost:8000".to_string())
 }
 
-/// Verify a ZPI proof against the zk-attestation-service.
+/// Verify a ZPI proof against the zk-attestation-service (zero-trust).
 ///
 /// Before settling, the merchant pulls the proof from the attester and
-/// verifies it. Without this check, any opaque blob Claude forwards as
-/// "proof" would pass the gate.
+/// verifies it *against its own record* rather than trusting an opaque
+/// `verified` flag. Without this, any blob Claude forwards as "proof" — or a
+/// valid proof for a *different* transaction — would pass the gate.
 ///
 /// Behaviour:
 ///   * If `zpi_proof_id` is `None` or empty → returns Ok (soft-skip). We
 ///     warn so the missing proof shows up in the log, but we don't block —
 ///     existing demos that haven't been updated to pass `zpi_proof_id` keep
 ///     working.
-///   * If `zpi_proof_id` is present → GET `{ZPI_ATTESTER_URL}/proofs/{id}/verify`.
-///     A 2xx with `{"success": true}` is the only accepted outcome.
-///   * If the supplied `zpi_proof_id` 404s, fall back to looking up the proof
-///     by `external_id` via `GET /proofs/session/{external_id}`. The
-///     zpi-cli MCP server currently fabricates a local `zkp-<uuid>` id and
-///     returns it as `zkp_proof_id`, while the attester stores the proof
-///     under its own UUID `proof_id`. Once the CLI is updated to surface the
-///     attester's id, this fallback becomes unreachable.
+///   * Otherwise, two steps:
+///     1. **Liveness** — `GET /proofs/{id}/verify` confirms the proof exists
+///        and is fresh (≤ 5 min). If the supplied id 404s (the zpi-cli still
+///        fabricates a local `zkp-<uuid>` id), we resolve the attester's real
+///        UUID via `GET /proofs/session/{external_id}` and retry.
+///     2. **Zero-trust binding** — `GET /proofs/{id}` returns the raw record;
+///        we parse the SP1-committed `public_values` and independently assert
+///        the committed `external_id` is *this* transaction and the committed
+///        `total_amount` field commitment matches the amount we're charging,
+///        re-derived from our own cart with the per-tx salt. The merchant
+///        trusts neither Claude nor the attester's flat metadata fields.
+///
+/// Note: this does not cryptographically verify the Groth16 proof bytes
+/// (that needs the SP1 verifier + program ELF embedded in the merchant);
+/// it verifies the proof's public-input bindings against the merchant record.
 async fn verify_zpi_proof_against_attester(
     zpi_proof_id: Option<&str>,
     external_id: &str,
@@ -1058,15 +1066,22 @@ async fn verify_zpi_proof_against_attester(
         .build()
         .map_err(|e| format!("failed to build HTTP client for attester: {}", e))?;
 
-    match verify_attester_proof_by_id(&client, &attester_url, supplied_id).await {
+    // Step 1 — confirm the proof exists and is fresh (attester `/verify`
+    // does a 5-minute freshness check + `verified` flag). This is a liveness
+    // gate only; the authoritative checks happen in step 2 against the
+    // committed public values. We still resolve through the existing
+    // `zkp-<uuid>` → attester-UUID fallback so older zpi-cli builds work.
+    let verified_proof_id = match verify_attester_proof_by_id(&client, &attester_url, supplied_id)
+        .await
+    {
         AttesterVerifyOutcome::Ok { session_id } => {
             tracing::info!(
-                "[FARM-NVM][ZPI] ✅ proof verified by attester proof_id={} session_id={} external_id={}",
+                "[FARM-NVM][ZPI] attester confirms proof exists + fresh proof_id={} session_id={} external_id={}",
                 supplied_id,
                 session_id.as_deref().unwrap_or("<none>"),
                 external_id
             );
-            Ok(())
+            supplied_id.to_string()
         }
         AttesterVerifyOutcome::NotFound => {
             tracing::warn!(
@@ -1082,23 +1097,412 @@ async fn verify_zpi_proof_against_attester(
             match verify_attester_proof_by_id(&client, &attester_url, &resolved).await {
                 AttesterVerifyOutcome::Ok { session_id } => {
                     tracing::info!(
-                        "[FARM-NVM][ZPI] ✅ proof verified by attester (via external_id fallback) proof_id={} session_id={} external_id={} supplied_id={}",
+                        "[FARM-NVM][ZPI] attester confirms proof exists + fresh (via external_id fallback) proof_id={} session_id={} external_id={} supplied_id={}",
                         resolved,
                         session_id.as_deref().unwrap_or("<none>"),
                         external_id,
                         supplied_id
                     );
-                    Ok(())
+                    resolved
                 }
-                AttesterVerifyOutcome::NotFound => Err(format!(
-                    "[FARM-NVM][ZPI] resolved proof_id={} (from external_id={}) was not found by the attester after lookup",
-                    resolved, external_id
-                )),
-                AttesterVerifyOutcome::Failed(msg) => Err(msg),
+                AttesterVerifyOutcome::NotFound => {
+                    return Err(format!(
+                        "[FARM-NVM][ZPI] resolved proof_id={} (from external_id={}) was not found by the attester after lookup",
+                        resolved, external_id
+                    ));
+                }
+                AttesterVerifyOutcome::Failed(msg) => return Err(msg),
             }
         }
-        AttesterVerifyOutcome::Failed(msg) => Err(msg),
+        AttesterVerifyOutcome::Failed(msg) => return Err(msg),
+    };
+
+    // Step 2 — ZERO-TRUST verification against the committed public values.
+    // Instead of trusting the attester's `verified` flag, we pull the raw
+    // proof record, parse the SP1 `public_values` the zkVM guest committed,
+    // and independently re-derive the bindings from the merchant's OWN record:
+    //   * the committed `external_id` MUST equal the transaction we're settling
+    //     (anti-substitution / anti-replay), and
+    //   * the committed `total_amount` field commitment MUST equal the amount
+    //     we're about to charge, re-hashed from our cart with the per-tx salt
+    //     (a malicious payer cannot inflate the amount or reuse another proof).
+    let material = fetch_proof_material_by_id(&client, &attester_url, &verified_proof_id)
+        .await?
+        .ok_or_else(|| {
+            format!(
+                "[FARM-NVM][ZPI] proof material disappeared for proof_id={} (external_id={}) between verify and fetch",
+                verified_proof_id, external_id
+            )
+        })?;
+
+    run_zero_trust_proof_checks(
+        &client,
+        &attester_url,
+        &material,
+        external_id,
+        expected_amount_cents,
+    )
+    .await?;
+
+    tracing::info!(
+        "[FARM-NVM][ZPI] ✅ zero-trust verification passed proof_id={} external_id={} amount_cents={} merchant_url={} — proof binds to this transaction + amount, accepting payment",
+        verified_proof_id,
+        external_id,
+        expected_amount_cents,
+        expected_merchant_url
+    );
+    Ok(())
+}
+
+/// Raw proof material pulled from `GET /proofs/{id}` (`data.proof.proof`).
+///
+/// `public_values_hex` is the authoritative, zkVM-committed byte string — the
+/// merchant parses it directly rather than trusting the attester's flat
+/// metadata fields. `field_commitments_meta` is the attester's *separate* JSON
+/// copy, used only as a defence-in-depth cross-check.
+struct ProofMaterial {
+    public_values_hex: String,
+    vk_hash: Option<String>,
+    program_id: Option<String>,
+    field_commitments_meta: Option<serde_json::Value>,
+}
+
+/// Fetch the full stored proof and extract its verification material.
+///
+/// Returns `Ok(None)` when the attester reports the proof does not exist (so a
+/// caller can fall back), `Err` on transport / shape problems, and `Ok(Some)`
+/// when the inner `data.proof.proof` blob was found.
+async fn fetch_proof_material_by_id(
+    client: &reqwest::Client,
+    attester_url: &str,
+    proof_id: &str,
+) -> Result<Option<ProofMaterial>, String> {
+    let url = format!(
+        "{}/proofs/{}",
+        attester_url.trim_end_matches('/'),
+        proof_id
+    );
+
+    let resp = client.get(&url).send().await.map_err(|e| {
+        format!(
+            "[FARM-NVM][ZPI] fetching full proof failed proof_id={} err={}",
+            proof_id, e
+        )
+    })?;
+
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
     }
+    if !status.is_success() {
+        return Err(format!(
+            "[FARM-NVM][ZPI] attester returned HTTP {} for full proof proof_id={}: {}",
+            status, proof_id, body
+        ));
+    }
+
+    let parsed: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+        format!(
+            "[FARM-NVM][ZPI] full proof response was not JSON proof_id={} err={} body={}",
+            proof_id, e, body
+        )
+    })?;
+
+    let success = parsed
+        .get("success")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !success {
+        let err = parsed.get("error").and_then(|v| v.as_str()).unwrap_or("");
+        if err.to_lowercase().contains("not found") {
+            return Ok(None);
+        }
+        return Err(format!(
+            "[FARM-NVM][ZPI] attester reported success=false for full proof proof_id={} error={}",
+            proof_id, err
+        ));
+    }
+
+    // The committed bytes live at data.proof.proof (the inner attestation blob).
+    let inner = parsed.pointer("/data/proof/proof").ok_or_else(|| {
+        format!(
+            "[FARM-NVM][ZPI] full proof missing data.proof.proof proof_id={} body={}",
+            proof_id, body
+        )
+    })?;
+
+    let public_values_hex = inner
+        .get("public_values")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| {
+            format!(
+                "[FARM-NVM][ZPI] proof record missing public_values proof_id={}",
+                proof_id
+            )
+        })?;
+
+    Ok(Some(ProofMaterial {
+        public_values_hex,
+        vk_hash: inner
+            .get("vk_hash")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        program_id: inner
+            .get("program_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        field_commitments_meta: inner.get("field_commitments").cloned(),
+    }))
+}
+
+/// Parse the SP1 `public_values` the zkVM guest committed.
+///
+/// Layout (must match `zero-proof-intent/src/zkp/commitment.rs`):
+///   1. `[u8; 32]`                  — intent_commitment (raw, skipped here)
+///   2. `u32`                       — verified_count (bincode default, fixint LE)
+///   3. `String`                    — external_id
+///   4. `Vec<(String, [u8; 32])>`   — field_name → commitment pairs
+///
+/// Returns `(committed_external_id, { field_name → commitment_hex })`.
+fn parse_committed_public_values(
+    public_values_hex: &str,
+) -> Result<(String, std::collections::HashMap<String, String>), String> {
+    use std::io::Read as _;
+
+    let bytes = hex::decode(public_values_hex.trim().trim_start_matches("0x"))
+        .map_err(|e| format!("[FARM-NVM][ZPI] public_values hex decode failed: {e}"))?;
+    let mut cursor = std::io::Cursor::new(bytes);
+
+    let mut _intent = [0u8; 32];
+    cursor
+        .read_exact(&mut _intent)
+        .map_err(|e| format!("[FARM-NVM][ZPI] public_values: reading intent_commitment: {e}"))?;
+
+    let _verified_count: u32 = bincode::deserialize_from(&mut cursor)
+        .map_err(|e| format!("[FARM-NVM][ZPI] public_values: reading verified_count: {e}"))?;
+
+    let committed_external_id: String = bincode::deserialize_from(&mut cursor)
+        .map_err(|e| format!("[FARM-NVM][ZPI] public_values: reading external_id: {e}"))?;
+
+    let pairs: Vec<(String, [u8; 32])> = bincode::deserialize_from(&mut cursor)
+        .map_err(|e| format!("[FARM-NVM][ZPI] public_values: reading field_commitments: {e}"))?;
+
+    let commitments = pairs
+        .into_iter()
+        .map(|(field, hash)| (field, hex::encode(hash)))
+        .collect();
+
+    Ok((committed_external_id, commitments))
+}
+
+/// SHA-256(field_name : canonical_value : external_id : secret_salt).
+/// Mirrors `compute_field_commitment` in zero-proof-intent's commitment.rs.
+fn compute_field_commitment(
+    field_name: &str,
+    canonical_value: &str,
+    external_id: &str,
+    secret_salt: &str,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(field_name.as_bytes());
+    hasher.update(b":");
+    hasher.update(canonical_value.as_bytes());
+    hasher.update(b":");
+    hasher.update(external_id.as_bytes());
+    hasher.update(b":");
+    hasher.update(secret_salt.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// Fetch the per-transaction salt from the attester so the merchant can
+/// reproduce the same field commitments the prover used.
+/// `GET /programs/{program_id}/derive-salt?external_id=` → `{ "derived_salt": "<hex>" }`.
+async fn derive_salt_from_attester(
+    client: &reqwest::Client,
+    attester_url: &str,
+    program_id: &str,
+    external_id: &str,
+) -> Result<String, String> {
+    // program_id is content-addressed like `sha256:<hex>`; the ':' must be
+    // percent-encoded so it isn't treated as a path component.
+    let encoded_program = program_id.replace(':', "%3A");
+    let url = format!(
+        "{}/programs/{}/derive-salt?external_id={}",
+        attester_url.trim_end_matches('/'),
+        encoded_program,
+        external_id
+    );
+
+    let resp = client.get(&url).send().await.map_err(|e| {
+        format!(
+            "[FARM-NVM][ZPI] derive-salt request failed program_id={} external_id={} err={}",
+            program_id, external_id, e
+        )
+    })?;
+
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!(
+            "[FARM-NVM][ZPI] derive-salt returned HTTP {} program_id={} external_id={}: {}",
+            status, program_id, external_id, body
+        ));
+    }
+
+    let parsed: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+        format!(
+            "[FARM-NVM][ZPI] derive-salt response not JSON program_id={} err={} body={}",
+            program_id, e, body
+        )
+    })?;
+
+    parsed
+        .get("derived_salt")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| {
+            format!(
+                "[FARM-NVM][ZPI] derive-salt response missing `derived_salt` program_id={} body={}",
+                program_id, body
+            )
+        })
+}
+
+/// Zero-trust checks against the zkVM-committed public values.
+///
+/// These do NOT cryptographically verify the Groth16 bytes (that would require
+/// embedding the SP1 verifier + program ELF). They DO ensure the proof the
+/// attester is vouching for actually binds to *this* transaction and *this*
+/// amount, recomputed from the merchant's own record — closing the gap where
+/// the merchant previously trusted the attester's opaque `verified` flag.
+async fn run_zero_trust_proof_checks(
+    client: &reqwest::Client,
+    attester_url: &str,
+    material: &ProofMaterial,
+    external_id: &str,
+    expected_amount_cents: u64,
+) -> Result<(), String> {
+    let (committed_external_id, committed) =
+        parse_committed_public_values(&material.public_values_hex)?;
+
+    // (a) external_id binding — the proof MUST be for this exact transaction.
+    if committed_external_id != external_id {
+        return Err(format!(
+            "[FARM-NVM][ZPI] external_id binding FAILED — proof commits external_id={} but we are settling external_id={}. Refusing (possible proof substitution / replay).",
+            committed_external_id, external_id
+        ));
+    }
+    tracing::info!(
+        "[FARM-NVM][ZPI] external_id binding OK — proof commits external_id={}",
+        committed_external_id
+    );
+
+    // (b) Optional VK / program pinning. If the operator pins an expected
+    // verifying key or program id, enforce it; otherwise just surface what we
+    // observed so a mismatch is visible in the logs.
+    if let Some(observed) = material.vk_hash.as_deref() {
+        match std::env::var("ZPI_EXPECTED_VK_HASH").ok().filter(|s| !s.trim().is_empty()) {
+            Some(expected) if !expected.eq_ignore_ascii_case(observed) => {
+                return Err(format!(
+                    "[FARM-NVM][ZPI] vk_hash mismatch — expected {} but proof carries {}. Refusing (wrong verifier circuit).",
+                    expected, observed
+                ));
+            }
+            Some(_) => tracing::info!("[FARM-NVM][ZPI] vk_hash matches pinned ZPI_EXPECTED_VK_HASH"),
+            None => tracing::info!("[FARM-NVM][ZPI] proof vk_hash={} (set ZPI_EXPECTED_VK_HASH to pin)", observed),
+        }
+    }
+    if let (Some(observed), Some(expected)) = (
+        material.program_id.as_deref(),
+        std::env::var("ZPI_EXPECTED_PROGRAM_ID").ok().filter(|s| !s.trim().is_empty()),
+    ) {
+        if expected != observed {
+            return Err(format!(
+                "[FARM-NVM][ZPI] program_id mismatch — expected {} but proof carries {}. Refusing.",
+                expected, observed
+            ));
+        }
+        tracing::info!("[FARM-NVM][ZPI] program_id matches pinned ZPI_EXPECTED_PROGRAM_ID");
+    }
+
+    // Defence in depth: the attester also stores a flat JSON copy of the field
+    // commitments. It should agree with the committed bytes; warn (don't fail)
+    // if it drifts, since the committed public_values are authoritative.
+    if let Some(meta) = material.field_commitments_meta.as_ref().and_then(|v| v.as_array()) {
+        for entry in meta {
+            if let (Some(field), Some(commitment)) = (
+                entry.get("field").and_then(|v| v.as_str()),
+                entry.get("commitment").and_then(|v| v.as_str()),
+            ) {
+                if let Some(committed_hex) = committed.get(field) {
+                    if !committed_hex.eq_ignore_ascii_case(commitment) {
+                        tracing::warn!(
+                            "[FARM-NVM][ZPI] attester metadata field_commitment for `{}` disagrees with committed public_values (meta={} committed={}) — trusting committed bytes",
+                            field, commitment, committed_hex
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // (c) Amount binding — recompute the `total_amount` field commitment from
+    // the amount we're about to charge and require it to match the proof.
+    // `amount_cents` is already integer cents, which is exactly the canonical
+    // form `canonicalize_value("total_amount", ..)` produces.
+    let canonical_amount = expected_amount_cents.to_string();
+
+    match committed.get("total_amount") {
+        Some(committed_amount_hash) => {
+            let program_id = material.program_id.as_deref().ok_or_else(|| {
+                format!(
+                    "[FARM-NVM][ZPI] cannot verify amount: proof record has no program_id to derive the salt (external_id={})",
+                    external_id
+                )
+            })?;
+            let salt =
+                derive_salt_from_attester(client, attester_url, program_id, external_id).await?;
+            let recomputed =
+                compute_field_commitment("total_amount", &canonical_amount, external_id, &salt);
+
+            if !recomputed.eq_ignore_ascii_case(committed_amount_hash) {
+                return Err(format!(
+                    "[FARM-NVM][ZPI] amount binding FAILED — proof's total_amount commitment {} does not match the {}-cent charge re-hashed from our record (got {}). Refusing (amount tampering).",
+                    committed_amount_hash, expected_amount_cents, recomputed
+                ));
+            }
+            tracing::info!(
+                "[FARM-NVM][ZPI] amount binding OK — proof commits total_amount == {} cents",
+                expected_amount_cents
+            );
+        }
+        None => {
+            // The conversation's extracted intent didn't include a total_amount
+            // predicate, so the proof can't bind the amount cryptographically.
+            // The external_id binding above still holds. Hard-fail only if the
+            // operator demands amount proofs.
+            let require = std::env::var("ZPI_REQUIRE_AMOUNT_COMMITMENT")
+                .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+                .unwrap_or(false);
+            let committed_fields: Vec<&String> = committed.keys().collect();
+            if require {
+                return Err(format!(
+                    "[FARM-NVM][ZPI] proof does not commit a `total_amount` field (committed fields: {:?}) and ZPI_REQUIRE_AMOUNT_COMMITMENT=true — refusing.",
+                    committed_fields
+                ));
+            }
+            tracing::warn!(
+                "[FARM-NVM][ZPI] proof commits no `total_amount` field (committed: {:?}) — amount not ZK-verified, relying on external_id binding only. Set ZPI_REQUIRE_AMOUNT_COMMITMENT=true to enforce.",
+                committed_fields
+            );
+        }
+    }
+
+    Ok(())
 }
 
 enum AttesterVerifyOutcome {
