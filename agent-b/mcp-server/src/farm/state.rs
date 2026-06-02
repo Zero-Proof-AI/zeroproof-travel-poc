@@ -86,3 +86,40 @@ impl axum::extract::FromRef<AppState> for SharedMerchantDb {
         state.merchant_db.clone()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_prune_verified_intents_drops_stale_keeps_fresh() {
+        let now = std::time::SystemTime::now();
+        let stale_at = now
+            .checked_sub(VERIFIED_INTENT_TTL + std::time::Duration::from_secs(1))
+            .expect("stale timestamp should be representable");
+
+        let mut state = FarmState::new();
+        state.verified_intents.insert(
+            "fresh-ext".into(),
+            VerifiedIntent {
+                amount_cents: 100,
+                merchant_url: "https://fresh.example".into(),
+                verified_at: now,
+            },
+        );
+        state.verified_intents.insert(
+            "stale-ext".into(),
+            VerifiedIntent {
+                amount_cents: 200,
+                merchant_url: "https://stale.example".into(),
+                verified_at: stale_at,
+            },
+        );
+
+        state.prune_verified_intents();
+
+        assert!(state.verified_intents.contains_key("fresh-ext"));
+        assert!(!state.verified_intents.contains_key("stale-ext"));
+        assert_eq!(state.verified_intents.len(), 1);
+    }
+}
