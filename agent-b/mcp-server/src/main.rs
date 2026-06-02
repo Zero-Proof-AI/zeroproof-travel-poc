@@ -975,6 +975,7 @@ async fn main() -> Result<()> {
         .route("/tools/farm-view-cart", post(handlers::handle_view_cart))
         .route("/tools/farm-checkout", post(handlers::handle_checkout))
         .route("/tools/pay-with-nevermined", post(handlers::handle_pay_with_nevermined))
+        .route("/internal/intent-verified", get(handlers::handle_intent_verified))
         .route("/tools/pay-with-vgs-credit-card", post(handlers::handle_pay_with_vgs_credit_card))
         .route("/tools/confirm-vgs-credit-card-payment", post(handlers::handle_confirm_vgs_credit_card_payment))
         .route("/tools/farm-confirm-payment", post(handlers::handle_farm_confirm_payment))
