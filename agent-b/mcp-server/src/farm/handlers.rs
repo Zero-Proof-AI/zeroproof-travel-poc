@@ -74,28 +74,26 @@ pub struct PayWithNeverminedRequest {
     /// Canonical zk-attestation-service proof UUID returned by ZPI.
     #[serde(default)]
     pub proof_id: Option<String>,
-    /// x402 access token minted by ZPI-ZKPay's `pay-with-nevermined-*` tool.
-    /// When present, agent-b forwards it verbatim to Nevermined /verify and
-    /// /settle instead of minting its own token from the user's NVM API key.
-    /// The user's NVM API key never leaves ZPI-ZKPay on this path.
+    /// Legacy/manual fallback x402 token. Preferred merchant-settles flow uses
+    /// `token_ref`; agent-b fetches the full token from ZPI-ZKPay over
+    /// localhost so Claude never relays raw token strings.
     #[serde(default)]
     pub x402_access_token: Option<String>,
-    /// Optional x402 `payloadEncoded` from ZPI-ZKPay. Either this or
-    /// `x402_access_token` is acceptable to Nevermined /verify; the
-    /// facilitator treats them interchangeably.
+    /// Legacy/manual fallback x402 `payloadEncoded`. Preferred flow uses
+    /// `token_ref`.
     #[serde(default)]
     pub payload_encoded: Option<String>,
-    /// Optional Nevermined plan id from ZPI-ZKPay's response. Required when
-    /// `x402_access_token` is provided AND agent-b's NVM_API_KEY (if any)
-    /// does not encode the same plan as the user's. ZPI-ZKPay returns
+    /// Optional Nevermined plan id from ZPI-ZKPay's response. Required for
+    /// preferred token_ref settlement because agent-b's NVM_API_KEY (if any)
+    /// may not encode the same plan as the user's. ZPI-ZKPay returns
     /// `payment_required.accepts[0].planId` — Claude should forward that
     /// value here.
     #[serde(default)]
     pub plan_id: Option<String>,
     /// Short opaque reference returned by ZPI-ZKPay's pay-with-nevermined
-    /// response. When present, agent-b fetches the full x402 token directly
-    /// from ZPI-ZKPay over localhost instead of relying on the token Claude
-    /// relayed (which can corrupt ~1 byte per ~5 relays).
+    /// response. Preferred settlement input: agent-b fetches the full x402
+    /// token directly from ZPI-ZKPay over localhost instead of relying on
+    /// Claude to relay a raw token string.
     #[serde(default)]
     pub token_ref: Option<String>,
     /// Delta #5: when true, the merchant ONLY verifies the ZPI proof against
@@ -2114,23 +2112,23 @@ pub async fn handle_pay_with_nevermined(
         }))));
     }
 
-    // The preferred flow has Claude forward an x402_access_token that ZPI-ZKPay
-    // already minted on the user's behalf. In that case the raw zpi_proof bytes
-    // are not required — the proof's validity is established by proof_id
+    // The preferred flow has Claude forward only token_ref; agent-b fetches the
+    // minted token from ZPI-ZKPay over localhost. In that case the raw zpi_proof
+    // bytes are not required — the proof's validity is established by proof_id
     // against the attester. The legacy flow still requires the bytes so this
     // handler can stash pending state and mint locally using NVM_API_KEY.
     let has_supplied_token = req
-        .x402_access_token
+        .token_ref
         .as_deref()
         .map(|s| !s.trim().is_empty())
         .unwrap_or(false)
         || req
-            .payload_encoded
+            .x402_access_token
             .as_deref()
             .map(|s| !s.trim().is_empty())
             .unwrap_or(false)
         || req
-            .token_ref
+            .payload_encoded
             .as_deref()
             .map(|s| !s.trim().is_empty())
             .unwrap_or(false);
@@ -2240,7 +2238,7 @@ pub async fn handle_pay_with_nevermined(
             StatusCode::BAD_REQUEST,
             Json(FarmToolResponse::err(
                 400,
-                "proof_id is required when x402_access_token/token_ref is supplied so the merchant can verify the ZPI intent proof against the attester".to_string(),
+                "proof_id is required when token_ref or legacy x402 token fields are supplied so the merchant can verify the ZPI intent proof against the attester".to_string(),
             )),
         ));
     }
@@ -2293,7 +2291,7 @@ pub async fn handle_pay_with_nevermined(
                         }
                         Err(e) => {
                             tracing::warn!(
-                                "[FARM-NVM] token_ref={} response parse failed: {} — falling back to x402_access_token external_id={}",
+                                "[FARM-NVM] token_ref={} response parse failed: {} — falling back to legacy relay token fields external_id={}",
                                 tref, e, external_id
                             );
                             None
@@ -2302,14 +2300,14 @@ pub async fn handle_pay_with_nevermined(
                 }
                 Ok(resp) => {
                     tracing::warn!(
-                        "[FARM-NVM] token_ref={} returned {} — falling back to x402_access_token external_id={}",
+                        "[FARM-NVM] token_ref={} returned {} — falling back to legacy relay token fields external_id={}",
                         tref, resp.status(), external_id
                     );
                     None
                 }
                 Err(e) => {
                     tracing::warn!(
-                        "[FARM-NVM] token_ref={} fetch failed: {} — falling back to x402_access_token external_id={}",
+                        "[FARM-NVM] token_ref={} fetch failed: {} — falling back to legacy relay token fields external_id={}",
                         tref, e, external_id
                     );
                     None
@@ -2341,7 +2339,7 @@ pub async fn handle_pay_with_nevermined(
     let (payment_credential, x_nevermined_api_key, token_supplied_by_zkpay) = match supplied_token {
         Some(token) => {
             tracing::info!(
-                "[FARM-NVM] Using x402_access_token supplied by ZPI-ZKPay (mint skipped) external_id={} token={}",
+                "[FARM-NVM] Using x402 token resolved from token_ref or legacy fallback (mint skipped) external_id={} token={}",
                 external_id,
                 redact_secret(&token)
             );
@@ -2349,9 +2347,9 @@ pub async fn handle_pay_with_nevermined(
         }
         None => {
             tracing::warn!(
-                "[FARM-NVM] No x402_access_token supplied — falling back to legacy mint via NVM_API_KEY. \
+                "[FARM-NVM] No token_ref or raw x402 token supplied — falling back to legacy mint via NVM_API_KEY. \
                  Update Claude's flow to call zpi-zkpay's pay-with-nevermined-merchant-settles first \
-                 and forward x402_access_token + plan_id here. external_id={}",
+                 and forward token_ref + plan_id here. external_id={}",
                 external_id
             );
             let nvm_api_key = std::env::var("NVM_API_KEY").map_err(|_| {
@@ -2359,7 +2357,7 @@ pub async fn handle_pay_with_nevermined(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(FarmToolResponse::err(
                         500,
-                        "x402_access_token is missing and NVM_API_KEY is not set — cannot proceed".to_string(),
+                        "token_ref/x402 token is missing and NVM_API_KEY is not set — cannot proceed".to_string(),
                     )),
                 )
             })?;
@@ -4148,21 +4146,21 @@ pub fn farm_tool_definitions() -> Vec<serde_json::Value> {
                         "type": "string",
                         "description": "Canonical proof_id from prove_intent. When supplied, the merchant pulls the proof from the attester (GET /proofs/{id}/verify) and rejects the payment if invalid."
                     },
-                    "x402_access_token": {
+                    "token_ref": {
                         "type": "string",
-                        "description": "x402 access token returned by zpi-zkpay's pay-with-nevermined-merchant-settles. When provided, the merchant skips minting and forwards this token to Nevermined /verify and /settle. Required for the preferred flow."
-                    },
-                    "payload_encoded": {
-                        "type": "string",
-                        "description": "Optional x402 payload_encoded from zpi-zkpay. Either this or x402_access_token works."
+                        "description": "Short opaque ref (e.g. tref-…) from zpi-zkpay's pay-with-nevermined-merchant-settles response. Preferred settlement input — the merchant fetches the full token from ZPI-ZKPay over localhost, eliminating relay corruption."
                     },
                     "plan_id": {
                         "type": "string",
-                        "description": "Nevermined planId from zpi-zkpay's payment_required.accepts[0].planId. Required for the preferred flow because the merchant's own NVM key (if any) charges against a different plan."
+                        "description": "Nevermined planId from zpi-zkpay's payment_required.accepts[0].planId. Required for preferred token_ref settlement because the merchant's own NVM key (if any) charges against a different plan."
                     },
-                    "token_ref": {
+                    "x402_access_token": {
                         "type": "string",
-                        "description": "Short opaque ref (e.g. tref-…) from zpi-zkpay's pay-with-nevermined-merchant-settles response. PREFERRED over x402_access_token — the merchant fetches the full token from ZPI-ZKPay over localhost, eliminating relay corruption."
+                        "description": "Legacy/manual fallback raw x402 token. Preferred flow uses token_ref so Claude does not relay raw token strings."
+                    },
+                    "payload_encoded": {
+                        "type": "string",
+                        "description": "Legacy/manual fallback x402 payload_encoded. Preferred flow uses token_ref."
                     },
                     "verify_only": {
                         "type": "boolean",
@@ -4248,10 +4246,10 @@ FARM MERCHANT INSTRUCTIONS:
        amount + description + external_id + proof_id (no token). Wait for INTENT_VERIFIED.
     e. Call zpi-zkpay pay-with-nevermined-merchant-settles Phase 2 with merchant_url +
        amount + the same external_id + proof_id. ZPI-ZKPay confirms step (d) before minting,
-       then returns token_ref, x402_access_token, payload_encoded, and payment_required
-       (accepts[0].planId is the planId).
+       then returns token_ref and payment_required (accepts[0].planId is the planId).
     f. Call pay-with-nevermined (this merchant) with merchant_url + amount + description +
-       token_ref (or x402_access_token) + plan_id + external_id + proof_id to settle.
+       token_ref + plan_id + external_id + proof_id to settle. Do not relay raw x402
+       token strings through Claude.
     Never use zpi-zkpay pay-with-nevermined-zpi-settles for this merchant-settles flow.
     Legacy fallback: calling pay-with-nevermined with only zpi_proof + external_id still
     works for backward compatibility, but the merchant will mint the x402 token from its own
