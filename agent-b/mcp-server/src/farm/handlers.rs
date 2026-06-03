@@ -6,6 +6,7 @@ use base64::Engine as _;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::BTreeMap;
 
 use farm_core::cart::add_to_cart;
 use farm_core::catalog::{find_product, list_products};
@@ -103,6 +104,10 @@ pub struct PayWithNeverminedRequest {
     /// `external_id` + `proof_id`.
     #[serde(default)]
     pub verify_only: Option<bool>,
+    /// ISO 4217 currency for ZPI amount/currency binding (e.g. `USD` or `usd`).
+    /// Trimmed and uppercased; defaults to `USD` when omitted.
+    #[serde(default)]
+    pub currency: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -162,19 +167,14 @@ pub struct PayWithVgsCreditCardRequest {
 #[derive(Debug, Deserialize)]
 pub struct ConfirmVgsCreditCardPaymentRequest {
     pub order_id: String,
-    #[serde(default = "default_true")]
     pub payment_confirmed: bool,
     #[serde(default)]
     pub transaction_ref: Option<String>,
     #[serde(default)]
     pub external_id: Option<String>,
     #[serde(default)]
-    pub charge_bundle: Option<String>,
-    #[serde(default)]
     pub zpi_response: Option<serde_json::Value>,
 }
-
-fn default_true() -> bool { true }
 
 #[derive(Debug, Deserialize)]
 pub struct FarmConfirmPaymentRequest {
@@ -221,6 +221,16 @@ impl FarmToolResponse {
         Self {
             success: false,
             data: None,
+            error: Some(error),
+            status_code: Some(status),
+            payment_required: None,
+        }
+    }
+
+    pub fn err_with_data(status: u16, error: String, data: serde_json::Value) -> Self {
+        Self {
+            success: false,
+            data: Some(data),
             error: Some(error),
             status_code: Some(status),
             payment_required: None,
@@ -280,13 +290,23 @@ fn allowed_merchant_host(url: &str) -> Result<(), String> {
 
 fn nevermined_http_trace_enabled() -> bool {
     std::env::var("NEVERMINED_HTTP_TRACE")
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
         .unwrap_or(false)
 }
 
 fn nevermined_verify_legacy_retry_enabled() -> bool {
     std::env::var("NEVERMINED_VERIFY_LEGACY_RETRY")
-        .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"))
+        .map(|v| {
+            !matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            )
+        })
         .unwrap_or(true)
 }
 
@@ -490,12 +510,19 @@ async fn mint_nevermined_access_token(
                 }
 
                 if status.is_success() {
-                    let body = serde_json::from_str::<serde_json::Value>(&raw_body)
-                        .map_err(|e| format!("failed to parse Nevermined token response: {}; raw={}", e, redact_body_text(&raw_body)))?;
+                    let body =
+                        serde_json::from_str::<serde_json::Value>(&raw_body).map_err(|e| {
+                            format!(
+                                "failed to parse Nevermined token response: {}; raw={}",
+                                e,
+                                redact_body_text(&raw_body)
+                            )
+                        })?;
 
                     // NVM Pay responses vary by endpoint; accept common token field names.
                     // v2 x402 shape returns payloadEncoded (base64) — prefer that.
-                    let token_val = body.get("payloadEncoded")
+                    let token_val = body
+                        .get("payloadEncoded")
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string())
                         .or_else(|| {
@@ -665,7 +692,7 @@ async fn verify_nevermined_token_if_configured(
             std::env::var("NEVERMINED_DANGER_ACCEPT_INVALID_CERTS")
                 .ok()
                 .map(|v| v.trim().eq_ignore_ascii_case("true"))
-                .unwrap_or(false)
+                .unwrap_or(false),
         )
         .build()
         .map_err(|e| format!("failed to build HTTP client: {}", e))?;
@@ -722,18 +749,29 @@ async fn verify_nevermined_token_if_configured(
         })
     } else {
         // Legacy facilitator schema: { paymentRequired, x402AccessToken }
-        let scheme = std::env::var("NEVERMINED_SCHEME").unwrap_or_else(|_| "nvm:erc4337".to_string());
+        let scheme =
+            std::env::var("NEVERMINED_SCHEME").unwrap_or_else(|_| "nvm:erc4337".to_string());
         let network = std::env::var("NEVERMINED_NETWORK").unwrap_or_else(|_| {
-            if scheme == "nvm:card-delegation" { "stripe".to_string() } else { "eip155:84532".to_string() }
+            if scheme == "nvm:card-delegation" {
+                "stripe".to_string()
+            } else {
+                "eip155:84532".to_string()
+            }
         });
         let plan_id = plan_id_override
             .map(|s| s.to_string())
             .filter(|v| !v.trim().is_empty())
             .or_else(|| extract_plan_id_from_x402_token(token))
             .or_else(|| {
-                std::env::var("NEVERMINED_PLAN_ID").ok().filter(|v| !v.trim().is_empty())
+                std::env::var("NEVERMINED_PLAN_ID")
+                    .ok()
+                    .filter(|v| !v.trim().is_empty())
             })
-            .or_else(|| std::env::var("NVM_API_KEY").ok().and_then(|k| extract_nvm_plan_id(&k)))
+            .or_else(|| {
+                std::env::var("NVM_API_KEY")
+                    .ok()
+                    .and_then(|k| extract_nvm_plan_id(&k))
+            })
             .unwrap_or_default();
         let payment_required = json!({
             "x402Version": 2,
@@ -762,11 +800,12 @@ async fn verify_nevermined_token_if_configured(
         );
     }
 
-    let resp = req
-        .json(&verify_body)
-        .send()
-        .await
-        .map_err(|e| format!("failed to verify Nevermined credential at {}: {}", verify_url, e))?;
+    let resp = req.json(&verify_body).send().await.map_err(|e| {
+        format!(
+            "failed to verify Nevermined credential at {}: {}",
+            verify_url, e
+        )
+    })?;
 
     let status = resp.status();
     let raw_body = resp.text().await.unwrap_or_default();
@@ -797,18 +836,29 @@ async fn verify_nevermined_token_if_configured(
         && looks_like_legacy_validation
         && nevermined_verify_legacy_retry_enabled()
     {
-        let scheme = std::env::var("NEVERMINED_SCHEME").unwrap_or_else(|_| "nvm:erc4337".to_string());
+        let scheme =
+            std::env::var("NEVERMINED_SCHEME").unwrap_or_else(|_| "nvm:erc4337".to_string());
         let network = std::env::var("NEVERMINED_NETWORK").unwrap_or_else(|_| {
-            if scheme == "nvm:card-delegation" { "stripe".to_string() } else { "eip155:84532".to_string() }
+            if scheme == "nvm:card-delegation" {
+                "stripe".to_string()
+            } else {
+                "eip155:84532".to_string()
+            }
         });
         let plan_id = plan_id_override
             .map(|s| s.to_string())
             .filter(|v| !v.trim().is_empty())
             .or_else(|| extract_plan_id_from_x402_token(token))
             .or_else(|| {
-                std::env::var("NEVERMINED_PLAN_ID").ok().filter(|v| !v.trim().is_empty())
+                std::env::var("NEVERMINED_PLAN_ID")
+                    .ok()
+                    .filter(|v| !v.trim().is_empty())
             })
-            .or_else(|| std::env::var("NVM_API_KEY").ok().and_then(|k| extract_nvm_plan_id(&k)))
+            .or_else(|| {
+                std::env::var("NVM_API_KEY")
+                    .ok()
+                    .and_then(|k| extract_nvm_plan_id(&k))
+            })
             .unwrap_or_default();
         let payment_required = json!({
             "x402Version": 2,
@@ -958,9 +1008,15 @@ async fn settle_nevermined_token(
         .map(|s| s.to_string())
         .filter(|v| !v.trim().is_empty())
         .or_else(|| {
-            std::env::var("NEVERMINED_PLAN_ID").ok().filter(|v| !v.trim().is_empty())
+            std::env::var("NEVERMINED_PLAN_ID")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
         })
-        .or_else(|| std::env::var("NVM_API_KEY").ok().and_then(|k| extract_nvm_plan_id(&k)))
+        .or_else(|| {
+            std::env::var("NVM_API_KEY")
+                .ok()
+                .and_then(|k| extract_nvm_plan_id(&k))
+        })
         .unwrap_or_default();
 
     let payment_required = json!({
@@ -1042,6 +1098,45 @@ fn zpi_require_amount_commitment() -> bool {
     }
 }
 
+/// Canonical ISO 4217 currency for merchant ZPI binding (trim + uppercase).
+/// Missing or empty defaults to `USD` for backward compatibility.
+fn canonicalize_merchant_currency(currency: Option<&str>) -> String {
+    currency
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("USD")
+        .to_ascii_uppercase()
+}
+
+/// Actionable JSON error for proof field binding failures (parsed by agents/tests).
+fn proof_binding_error(field: &str, merchant_canonical: &str, hint: &str, message: &str) -> String {
+    serde_json::to_string(&json!({
+        "status": "PROOF_BINDING_FAILED",
+        "field": field,
+        "merchant_canonical": merchant_canonical,
+        "hint": hint,
+        "message": message,
+    }))
+    .unwrap_or_else(|_| {
+        format!(
+            "[FARM-NVM][ZPI] {field} binding FAILED — {message} (merchant canonical: {merchant_canonical}; hint: {hint})"
+        )
+    })
+}
+
+fn proof_verification_error_response(status: u16, error: String) -> FarmToolResponse {
+    if let Ok(data) = serde_json::from_str::<serde_json::Value>(&error) {
+        let message = data
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("proof verification failed")
+            .to_string();
+        FarmToolResponse::err_with_data(status, message, data)
+    } else {
+        FarmToolResponse::err(status, error)
+    }
+}
+
 fn proof_id_from_request(req: &PayWithNeverminedRequest) -> Option<&str> {
     req.proof_id
         .as_deref()
@@ -1079,6 +1174,7 @@ async fn verify_zpi_proof_against_attester(
     proof_id: Option<&str>,
     external_id: &str,
     expected_amount_cents: u64,
+    expected_currency: &str,
     expected_merchant_url: &str,
 ) -> Result<String, String> {
     let supplied_id = match proof_id.map(|s| s.trim()).filter(|s| !s.is_empty()) {
@@ -1175,14 +1271,28 @@ async fn verify_zpi_proof_against_attester(
         &material,
         external_id,
         expected_amount_cents,
+        expected_currency,
+    )
+    .await?;
+
+    verify_sp1_proof_with_attester(
+        &client,
+        &attester_url,
+        &verified_proof_id,
+        external_id,
+        expected_amount_cents,
+        expected_currency,
+        material.program_id.as_deref(),
+        material.vk_hash.as_deref(),
     )
     .await?;
 
     tracing::info!(
-        "[FARM-NVM][ZPI] ✅ zero-trust verification passed proof_id={} external_id={} amount_cents={} merchant_url={} — proof binds to this transaction + amount, accepting payment",
+        "[FARM-NVM][ZPI] ✅ zero-trust verification passed proof_id={} external_id={} amount_cents={} currency={} merchant_url={} — proof binds to this transaction + amount + currency, accepting payment",
         verified_proof_id,
         external_id,
         expected_amount_cents,
+        expected_currency,
         expected_merchant_url
     );
     Ok(verified_proof_id)
@@ -1432,6 +1542,7 @@ async fn run_zero_trust_proof_checks(
     material: &ProofMaterial,
     external_id: &str,
     expected_amount_cents: u64,
+    expected_currency: &str,
 ) -> Result<(), String> {
     let (committed_external_id, committed) =
         parse_committed_public_values(&material.public_values_hex)?;
@@ -1452,20 +1563,30 @@ async fn run_zero_trust_proof_checks(
     // verifying key or program id, enforce it; otherwise just surface what we
     // observed so a mismatch is visible in the logs.
     if let Some(observed) = material.vk_hash.as_deref() {
-        match std::env::var("ZPI_EXPECTED_VK_HASH").ok().filter(|s| !s.trim().is_empty()) {
+        match std::env::var("ZPI_EXPECTED_VK_HASH")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+        {
             Some(expected) if !expected.eq_ignore_ascii_case(observed) => {
                 return Err(format!(
                     "[FARM-NVM][ZPI] vk_hash mismatch — expected {} but proof carries {}. Refusing (wrong verifier circuit).",
                     expected, observed
                 ));
             }
-            Some(_) => tracing::info!("[FARM-NVM][ZPI] vk_hash matches pinned ZPI_EXPECTED_VK_HASH"),
-            None => tracing::info!("[FARM-NVM][ZPI] proof vk_hash={} (set ZPI_EXPECTED_VK_HASH to pin)", observed),
+            Some(_) => {
+                tracing::info!("[FARM-NVM][ZPI] vk_hash matches pinned ZPI_EXPECTED_VK_HASH")
+            }
+            None => tracing::info!(
+                "[FARM-NVM][ZPI] proof vk_hash={} (set ZPI_EXPECTED_VK_HASH to pin)",
+                observed
+            ),
         }
     }
     if let (Some(observed), Some(expected)) = (
         material.program_id.as_deref(),
-        std::env::var("ZPI_EXPECTED_PROGRAM_ID").ok().filter(|s| !s.trim().is_empty()),
+        std::env::var("ZPI_EXPECTED_PROGRAM_ID")
+            .ok()
+            .filter(|s| !s.trim().is_empty()),
     ) {
         if expected != observed {
             return Err(format!(
@@ -1497,41 +1618,15 @@ async fn run_zero_trust_proof_checks(
         }
     }
 
-    // (c) Amount binding — recompute the `total_amount` field commitment from
-    // the amount we're about to charge and require it to match the proof.
+    // (c) Amount + currency binding — recompute merchant-owned commitments from
+    // checkout state and require them to match the proof.
     // `amount_cents` is already integer cents, which is exactly the canonical
     // form `canonicalize_value("total_amount", ..)` produces.
     let canonical_amount = expected_amount_cents.to_string();
-
-    match committed.get("total_amount") {
-        Some(committed_amount_hash) => {
-            let program_id = material.program_id.as_deref().ok_or_else(|| {
-                format!(
-                    "[FARM-NVM][ZPI] cannot verify amount: proof record has no program_id to derive the salt (external_id={})",
-                    external_id
-                )
-            })?;
-            let salt =
-                derive_salt_from_attester(client, attester_url, program_id, external_id).await?;
-            let recomputed =
-                compute_field_commitment("total_amount", &canonical_amount, external_id, &salt);
-
-            if !recomputed.eq_ignore_ascii_case(committed_amount_hash) {
-                return Err(format!(
-                    "[FARM-NVM][ZPI] amount binding FAILED — proof's total_amount commitment {} does not match the {}-cent charge re-hashed from our record (got {}). Refusing (amount tampering).",
-                    committed_amount_hash, expected_amount_cents, recomputed
-                ));
-            }
-            tracing::info!(
-                "[FARM-NVM][ZPI] amount binding OK — proof commits total_amount == {} cents",
-                expected_amount_cents
-            );
-        }
+    let canonical_currency = expected_currency.trim().to_ascii_uppercase();
+    let committed_amount_hash = match committed.get("total_amount") {
+        Some(hash) => hash,
         None => {
-            // The conversation's extracted intent didn't include a total_amount
-            // predicate, so the proof can't bind the amount cryptographically.
-            // The external_id binding above still holds. By default we refuse;
-            // set ZPI_REQUIRE_AMOUNT_COMMITMENT=false to allow legacy proofs.
             let committed_fields: Vec<&String> = committed.keys().collect();
             if zpi_require_amount_commitment() {
                 return Err(format!(
@@ -1543,9 +1638,162 @@ async fn run_zero_trust_proof_checks(
                 "[FARM-NVM][ZPI] proof commits no `total_amount` field (committed: {:?}) — amount not ZK-verified, relying on external_id binding only (ZPI_REQUIRE_AMOUNT_COMMITMENT=false).",
                 committed_fields
             );
+            ""
         }
+    };
+    let committed_currency_hash = committed.get("currency").ok_or_else(|| {
+        let committed_fields: Vec<&String> = committed.keys().collect();
+        format!(
+            "[FARM-NVM][ZPI] proof does not commit a `currency` field (committed fields: {:?}) — refusing (currency ZK binding required).",
+            committed_fields
+        )
+    })?;
+    let program_id = material.program_id.as_deref().ok_or_else(|| {
+        format!(
+            "[FARM-NVM][ZPI] cannot verify amount/currency: proof record has no program_id to derive the salt (external_id={})",
+            external_id
+        )
+    })?;
+    let salt = derive_salt_from_attester(client, attester_url, program_id, external_id).await?;
+
+    if !committed_amount_hash.is_empty() {
+        let recomputed =
+            compute_field_commitment("total_amount", &canonical_amount, external_id, &salt);
+
+        if !recomputed.eq_ignore_ascii_case(committed_amount_hash) {
+            return Err(format!(
+                "[FARM-NVM][ZPI] amount binding FAILED — proof's total_amount commitment {} does not match the {}-cent charge re-hashed from our record (got {}). Refusing (amount tampering).",
+                committed_amount_hash, expected_amount_cents, recomputed
+            ));
+        }
+        tracing::info!(
+            "[FARM-NVM][ZPI] amount binding OK — proof commits total_amount == {} cents",
+            expected_amount_cents
+        );
     }
 
+    let recomputed = compute_field_commitment("currency", &canonical_currency, external_id, &salt);
+    if !recomputed.eq_ignore_ascii_case(committed_currency_hash) {
+        return Err(proof_binding_error(
+            "currency",
+            &canonical_currency,
+            "Re-prove with spend witness currency matching merchant canonical form (trim + uppercase ISO 4217, e.g. USD). Proofs that committed lowercase or mixed-case currency (e.g. usd) will not bind against merchant USD.",
+            &format!(
+                "proof currency commitment {} does not match merchant re-hash for canonical '{}' (recomputed {}).",
+                committed_currency_hash, canonical_currency, recomputed
+            ),
+        ));
+    }
+    tracing::info!(
+        "[FARM-NVM][ZPI] currency binding OK — proof commits currency == {}",
+        canonical_currency
+    );
+
+    Ok(())
+}
+
+async fn verify_sp1_proof_with_attester(
+    client: &reqwest::Client,
+    attester_url: &str,
+    proof_id: &str,
+    external_id: &str,
+    expected_amount_cents: u64,
+    expected_currency: &str,
+    expected_program_id: Option<&str>,
+    expected_vk_hash: Option<&str>,
+) -> Result<(), String> {
+    let program_id = expected_program_id.ok_or_else(|| {
+        format!(
+            "[FARM-NVM][ZPI] cannot request attester crypto verification: proof_id={} has no program_id",
+            proof_id
+        )
+    })?;
+    let salt = derive_salt_from_attester(client, attester_url, program_id, external_id).await?;
+    let mut expected_field_commitments = BTreeMap::new();
+    expected_field_commitments.insert(
+        "total_amount".to_string(),
+        compute_field_commitment(
+            "total_amount",
+            &expected_amount_cents.to_string(),
+            external_id,
+            &salt,
+        ),
+    );
+    expected_field_commitments.insert(
+        "currency".to_string(),
+        compute_field_commitment(
+            "currency",
+            &expected_currency.trim().to_ascii_uppercase(),
+            external_id,
+            &salt,
+        ),
+    );
+
+    let url = format!(
+        "{}/proofs/attester-verify",
+        attester_url.trim_end_matches('/')
+    );
+    let mut payload = json!({
+        "proof_id": proof_id,
+        "expected_external_id": external_id,
+        "expected_field_commitments": expected_field_commitments,
+        "expected_program_id": program_id,
+    });
+    if let Some(vk_hash) = expected_vk_hash {
+        payload["expected_vk_hash"] = json!(vk_hash);
+    }
+
+    let resp = client.post(&url).json(&payload).send().await.map_err(|e| {
+        format!(
+            "[FARM-NVM][ZPI] attester crypto verification request failed proof_id={} err={}",
+            proof_id, e
+        )
+    })?;
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!(
+            "[FARM-NVM][ZPI] attester crypto verification HTTP {} proof_id={}: {}",
+            status,
+            proof_id,
+            redact_body_text(&body)
+        ));
+    }
+
+    let parsed: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+        format!(
+            "[FARM-NVM][ZPI] attester crypto verification response was not JSON proof_id={} err={} body={}",
+            proof_id,
+            e,
+            redact_body_text(&body)
+        )
+    })?;
+
+    let success = parsed
+        .get("success")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let crypto_verified = parsed
+        .get("crypto_verified")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let bindings_verified = parsed
+        .get("bindings_verified")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !(success && crypto_verified && bindings_verified) {
+        return Err(format!(
+            "[FARM-NVM][ZPI] attester crypto verification failed proof_id={} response={}",
+            proof_id,
+            redact_json_value(&parsed)
+        ));
+    }
+
+    tracing::info!(
+        "[FARM-NVM][ZPI] attester SP1 verification OK proof_id={} external_id={} fields=[total_amount,currency]",
+        proof_id,
+        external_id
+    );
     Ok(())
 }
 
@@ -1753,6 +2001,7 @@ pub async fn handle_intent_verified(
                 "verified": true,
                 "external_id": external_id,
                 "amount_cents": v.amount_cents,
+                "currency": v.currency,
                 "merchant_url": v.merchant_url,
                 "proof_id": v.proof_id,
                 "verified_at_secs": verified_at_secs,
@@ -1770,19 +2019,13 @@ pub async fn handle_pay_with_nevermined(
     State(state): State<SharedFarmState>,
     Json(req): Json<PayWithNeverminedRequest>,
 ) -> Result<Json<FarmToolResponse>, (StatusCode, Json<FarmToolResponse>)> {
-    allowed_merchant_host(&req.merchant_url).map_err(|e| {
-        (
-            StatusCode::FORBIDDEN,
-            Json(FarmToolResponse::err(403, e)),
-        )
-    })?;
+    allowed_merchant_host(&req.merchant_url)
+        .map_err(|e| (StatusCode::FORBIDDEN, Json(FarmToolResponse::err(403, e))))?;
 
-    let amount_cents = amount_to_cents(req.amount).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(FarmToolResponse::err(400, e)),
-        )
-    })?;
+    let amount_cents = amount_to_cents(req.amount)
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(FarmToolResponse::err(400, e))))?;
+
+    let canonical_currency = canonicalize_merchant_currency(req.currency.as_deref());
 
     let requested_external_id = req.external_id.clone();
     let zpi_proof = req.zpi_proof.clone().unwrap_or_default();
@@ -1825,12 +2068,16 @@ pub async fn handle_pay_with_nevermined(
             Some(supplied_proof_id),
             &external_id,
             amount_cents,
+            &canonical_currency,
             &req.merchant_url,
         )
         .await
         .map_err(|e| {
             tracing::error!("{}", e);
-            (StatusCode::FORBIDDEN, Json(FarmToolResponse::err(403, e)))
+            (
+                StatusCode::FORBIDDEN,
+                Json(proof_verification_error_response(403, e)),
+            )
         })?;
 
         {
@@ -1840,6 +2087,7 @@ pub async fn handle_pay_with_nevermined(
                 external_id.clone(),
                 super::state::VerifiedIntent {
                     amount_cents,
+                    currency: canonical_currency.clone(),
                     merchant_url: req.merchant_url.clone(),
                     proof_id: canonical_proof_id.clone(),
                     verified_at: std::time::SystemTime::now(),
@@ -1848,9 +2096,10 @@ pub async fn handle_pay_with_nevermined(
         }
 
         tracing::info!(
-            "[FARM-NVM][ZPI] verify_only OK — recorded merchant verification external_id={} amount_cents={}",
+            "[FARM-NVM][ZPI] verify_only OK — recorded merchant verification external_id={} amount_cents={} currency={}",
             external_id,
-            amount_cents
+            amount_cents,
+            canonical_currency
         );
 
         return Ok(Json(FarmToolResponse::ok(json!({
@@ -1859,6 +2108,7 @@ pub async fn handle_pay_with_nevermined(
             "proof_id": canonical_proof_id,
             "amount": format_dollars(amount_cents),
             "amount_cents": amount_cents,
+            "currency": canonical_currency,
             "merchant_url": req.merchant_url,
             "instructions": "Merchant verified the ZPI proof. Now call zpi-zkpay pay-with-nevermined-merchant-settles Phase 2 (same external_id + proof_id) to mint — only after this INTENT_VERIFIED. Then call this tool again with token_ref + plan_id + external_id + proof_id to settle."
         }))));
@@ -1904,7 +2154,7 @@ pub async fn handle_pay_with_nevermined(
             "payment_details": {
                 "amount": format_dollars(amount_cents),
                 "amount_cents": amount_cents,
-                "currency": "USD",
+                "currency": canonical_currency,
                 "merchant_url": req.merchant_url,
                 "description": req.description,
                 "payment_processor": "nevermined"
@@ -1999,6 +2249,7 @@ pub async fn handle_pay_with_nevermined(
         supplied_proof_id,
         &external_id,
         amount_cents,
+        &canonical_currency,
         &req.merchant_url,
     )
     .await
@@ -2006,7 +2257,7 @@ pub async fn handle_pay_with_nevermined(
         tracing::error!("{}", e);
         (
             StatusCode::FORBIDDEN,
-            Json(FarmToolResponse::err(403, e)),
+            Json(proof_verification_error_response(403, e)),
         )
     })?;
 
@@ -2119,12 +2370,7 @@ pub async fn handle_pay_with_nevermined(
             let cred = if use_token_exchange {
                 mint_nevermined_access_token(&nvm_api_key, amount_cents, &req.merchant_url)
                     .await
-                    .map_err(|e| {
-                        (
-                            StatusCode::BAD_GATEWAY,
-                            Json(FarmToolResponse::err(502, e)),
-                        )
-                    })?
+                    .map_err(|e| (StatusCode::BAD_GATEWAY, Json(FarmToolResponse::err(502, e))))?
             } else {
                 nvm_api_key.clone()
             };
@@ -2158,12 +2404,7 @@ pub async fn handle_pay_with_nevermined(
             plan_id_for_verify.as_deref(),
         )
         .await
-        .map_err(|e| {
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(FarmToolResponse::err(502, e)),
-            )
-        })?;
+        .map_err(|e| (StatusCode::BAD_GATEWAY, Json(FarmToolResponse::err(502, e))))?;
     }
 
     let stop_after_verify = std::env::var("NEVERMINED_STOP_AFTER_VERIFY")
@@ -2214,7 +2455,8 @@ pub async fn handle_pay_with_nevermined(
         .header("Authorization", format!("Bearer {}", payment_credential))
         .header("X-Nevermined-Access-Token", &payment_credential)
         .header("X-Expected-Amount-Cents", amount_cents.to_string())
-        .header("X-ZPI-External-Id", &external_id);
+        .header("X-ZPI-External-Id", &external_id)
+        .header("X-ZPI-Currency", &canonical_currency);
     if !canonical_proof_id.is_empty() {
         merchant_req = merchant_req.header("X-ZPI-Proof-Id", &canonical_proof_id);
     }
@@ -2399,7 +2641,7 @@ pub async fn handle_checkout_with_credit_card(
         "zpi_tool": "pay-with-credit-card",
         "zpi_arguments": body,
         "next_tool": "confirm-payment",
-        "instructions": "Now call the zpi-zkpay MCP server tool pay-with-credit-card with zpi_arguments exactly. If that succeeds, call confirm-payment with order_id and either charge_bundle or zpi_response from zpi-zkpay.",
+        "instructions": "Now call zpi-zkpay MCP tool pay-with-credit-card with zpi_arguments exactly. If that succeeds, call confirm-payment with order_id, payment_confirmed=true, and zpi_response from zpi-zkpay.",
     }))))
 }
 
@@ -2426,11 +2668,10 @@ pub async fn handle_confirm_payment(
         ));
     }
 
-    // Require charge evidence from either the original zpi_response or a direct
-    // top-level charge_bundle payload. This keeps the endpoint compatible with
-    // the tool-call shape actually used by the agent.
-    let has_charge_evidence = req.charge_bundle.as_deref().is_some()
-        || req.zpi_response.as_ref().and_then(|v| v.get("charge_bundle")).is_some()
+    // Require a zpi_response containing a charge_bundle — this is set by
+    // zpi-zkpay checkout-with-credit-card and proves an actual charge was made.
+    // Without this check an LLM can mark orders as PAID without charging the card.
+    let has_charge_evidence = req.zpi_response.as_ref().and_then(|v| v.get("charge_bundle")).is_some()
         || req.zpi_response.as_ref().and_then(|v| v.get("external_id")).is_some();
     if !has_charge_evidence {
         tracing::warn!(
@@ -2441,7 +2682,7 @@ pub async fn handle_confirm_payment(
             StatusCode::BAD_REQUEST,
             Json(FarmToolResponse::err(
                 400,
-                "zpi_response from pay-with-credit-card is required (must contain charge_bundle or external_id)".to_string(),
+                "zpi_response from checkout-with-credit-card is required (must contain charge_bundle or external_id)".to_string(),
             )),
         ));
     }
@@ -2484,14 +2725,10 @@ pub async fn handle_confirm_payment(
         // Only mark the order paid if Stripe confirms the PaymentIntent.
         let stripe_pi_id: Option<String> =
             if let Some(bundle) = req
-                .charge_bundle
-                .as_deref()
-                .or_else(|| {
-                    req.zpi_response
-                        .as_ref()
-                        .and_then(|v| v.get("charge_bundle"))
-                        .and_then(|v| v.as_str())
-                })
+                .zpi_response
+                .as_ref()
+                .and_then(|v| v.get("charge_bundle"))
+                .and_then(|v| v.as_str())
             {
                 if let Ok(secret_key) = std::env::var("STRIPE_SECRET_KEY") {
                     match try_decrypt_charge_bundle_jwe(bundle).await {
@@ -2513,131 +2750,118 @@ pub async fn handle_confirm_payment(
                                                 ),
                                             )),
                                         ));
-                                    }
                                 }
                             }
+                        }
 
-                            let dpan =
-                                payload.get("dpan").and_then(|v| v.as_str()).unwrap_or("");
-                            let cryptogram = payload
-                                .get("cryptogram")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
+                        let dpan = payload.get("dpan").and_then(|v| v.as_str()).unwrap_or("");
+                        let cryptogram = payload
+                            .get("cryptogram")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
 
-                            if dpan.is_empty() || cryptogram.is_empty() {
-                                tracing::warn!(
+                        if dpan.is_empty() || cryptogram.is_empty() {
+                            tracing::warn!(
                                     "[FARM-VGS] charge_bundle decrypted but dpan/cryptogram absent — skipping Stripe"
                                 );
-                                None
-                            } else {
-                                let exp_month: u32 = payload
-                                    .get("expMonth")
-                                    .and_then(|v| v.as_str())
-                                    .and_then(|s| s.parse().ok())
-                                    .unwrap_or(1);
-                                let exp_year: u32 = payload
-                                    .get("expYear")
-                                    .and_then(|v| v.as_str())
-                                    .and_then(|s| s.parse().ok())
-                                    .unwrap_or(2099);
-                                let amount = payload
-                                    .get("amount")
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(order.total_cents);
-                                let currency = payload
-                                    .get("currency")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("840");
-                                let cryptogram_type = payload
-                                    .get("cryptogramType")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("short");
-                                let cavv =
-                                    payload.get("cavv").and_then(|v| v.as_str());
-                                let eci =
-                                    payload.get("eci").and_then(|v| v.as_str());
-                                let ds_trans_id =
-                                    payload.get("dsTransId").and_then(|v| v.as_str());
-                                let bundle_merchant_id = payload
-                                    .get("merchant_id")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("unknown");
-                                let bundle_ext_id = payload
-                                    .get("external_id")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or(
-                                        req.external_id.as_deref().unwrap_or(""),
-                                    );
+                            None
+                        } else {
+                            let exp_month: u32 = payload
+                                .get("expMonth")
+                                .and_then(|v| v.as_str())
+                                .and_then(|s| s.parse().ok())
+                                .unwrap_or(1);
+                            let exp_year: u32 = payload
+                                .get("expYear")
+                                .and_then(|v| v.as_str())
+                                .and_then(|s| s.parse().ok())
+                                .unwrap_or(2099);
+                            let amount = payload
+                                .get("amount")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(order.total_cents);
+                            let currency = payload
+                                .get("currency")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("840");
+                            let cryptogram_type = payload
+                                .get("cryptogramType")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("short");
+                            let cavv = payload.get("cavv").and_then(|v| v.as_str());
+                            let eci = payload.get("eci").and_then(|v| v.as_str());
+                            let bundle_merchant_id = payload
+                                .get("merchant_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown");
+                            let bundle_ext_id = payload
+                                .get("external_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or(req.external_id.as_deref().unwrap_or(""));
 
-                                tracing::info!(
+                            tracing::info!(
                                     "[FARM-VGS] Charging DPAN via Stripe: order={}, merchant={}, amount={}",
                                     req.order_id, bundle_merchant_id, amount
                                 );
 
-                                match crate::farm::stripe::charge_with_network_token(
-                                    &secret_key,
-                                    dpan,
-                                    exp_month,
-                                    exp_year,
-                                    cryptogram,
-                                    cryptogram_type,
-                                    amount,
-                                    currency,
-                                    bundle_ext_id,
-                                    bundle_merchant_id,
-                                    cavv,
-                                    eci,
-                                    ds_trans_id,
-                                )
-                                .await
-                                {
-                                    Ok(pi_id) => {
-                                        tracing::info!(
-                                            "[FARM-VGS] Stripe charge succeeded: order={}, pi={}",
-                                            req.order_id, pi_id
-                                        );
-                                        Some(pi_id)
-                                    }
-                                    Err(e) => {
-                                        tracing::error!(
-                                            "[FARM-VGS] Stripe charge failed: {}",
-                                            e
-                                        );
-                                        return Err((
-                                            StatusCode::PAYMENT_REQUIRED,
-                                            Json(FarmToolResponse::err(
-                                                402,
-                                                format!("Stripe charge failed: {}", e),
-                                            )),
-                                        ));
-                                    }
+                            match crate::farm::stripe::charge_with_network_token(
+                                &secret_key,
+                                dpan,
+                                exp_month,
+                                exp_year,
+                                cryptogram,
+                                cryptogram_type,
+                                amount,
+                                currency,
+                                bundle_ext_id,
+                                bundle_merchant_id,
+                                cavv,
+                                eci,
+                            )
+                            .await
+                            {
+                                Ok(pi_id) => {
+                                    tracing::info!(
+                                        "[FARM-VGS] Stripe charge succeeded: order={}, pi={}",
+                                        req.order_id,
+                                        pi_id
+                                    );
+                                    Some(pi_id)
+                                }
+                                Err(e) => {
+                                    tracing::error!("[FARM-VGS] Stripe charge failed: {}", e);
+                                    return Err((
+                                        StatusCode::PAYMENT_REQUIRED,
+                                        Json(FarmToolResponse::err(
+                                            402,
+                                            format!("Stripe charge failed: {}", e),
+                                        )),
+                                    ));
                                 }
                             }
                         }
-                        Err(e) => {
-                            tracing::error!(
-                                "[FARM-VGS] JWE decrypt failed — refusing payment: {}",
-                                e
-                            );
-                            return Err((
-                                StatusCode::PAYMENT_REQUIRED,
-                                Json(FarmToolResponse::err(
-                                    402,
-                                    format!("charge_bundle decryption failed: {e}"),
-                                )),
-                            ));
-                        }
                     }
-                } else {
-                    // STRIPE_SECRET_KEY not configured — dev fallback (trust-based)
-                    tracing::warn!(
-                        "[FARM-VGS] STRIPE_SECRET_KEY not set — accepting zpi_response without PSP charge"
-                    );
-                    None
+                    Err(e) => {
+                        tracing::error!("[FARM-VGS] JWE decrypt failed — refusing payment: {}", e);
+                        return Err((
+                            StatusCode::PAYMENT_REQUIRED,
+                            Json(FarmToolResponse::err(
+                                402,
+                                format!("charge_bundle decryption failed: {e}"),
+                            )),
+                        ));
+                    }
                 }
             } else {
+                // STRIPE_SECRET_KEY not configured — dev fallback (trust-based)
+                tracing::warn!(
+                        "[FARM-VGS] STRIPE_SECRET_KEY not set — accepting zpi_response without PSP charge"
+                    );
                 None
-            };
+            }
+        } else {
+            None
+        };
 
         let is_stripe_charge = stripe_pi_id.is_some();
         let _ = is_stripe_charge; // used below for psp_label
@@ -2825,24 +3049,18 @@ pub async fn handle_farm_confirm_payment(
             Json(FarmToolResponse::err(500, format!("spawn_blocking: {e}"))),
         )
     })?
-    .map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(FarmToolResponse::err(400, e)),
-        )
-    })?;
+    .map_err(|e| (StatusCode::BAD_REQUEST, Json(FarmToolResponse::err(400, e))))?;
 
     // 4. Parse decrypted payload
-    let decrypted: serde_json::Value =
-        serde_json::from_slice(&plaintext_bytes).map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(FarmToolResponse::err(
-                    400,
-                    format!("Decrypted payload is not valid JSON: {e}"),
-                )),
-            )
-        })?;
+    let decrypted: serde_json::Value = serde_json::from_slice(&plaintext_bytes).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(FarmToolResponse::err(
+                400,
+                format!("Decrypted payload is not valid JSON: {e}"),
+            )),
+        )
+    })?;
 
     // 5. Validate external_id
     let bundle_external_id = decrypted
@@ -3057,12 +3275,8 @@ pub async fn handle_add_to_cart(
         .entry(req.session_id.clone())
         .or_insert_with(|| Cart::new(req.session_id.clone()));
 
-    add_to_cart(cart, &req.product_id, req.quantity).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(FarmToolResponse::err(400, e)),
-        )
-    })?;
+    add_to_cart(cart, &req.product_id, req.quantity)
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(FarmToolResponse::err(400, e))))?;
 
     let cart_json = cart_to_json(cart);
     Ok(Json(FarmToolResponse::ok(json!({ "cart": cart_json }))))
@@ -3244,7 +3458,7 @@ pub async fn handle_checkout(
                     "arguments": {
                         "merchant_url": merchant_url.clone(),
                         "amount": (order.total_cents as f64) / 100.0,
-                        "currency": "usd",
+                        "currency": "USD",
                         "description": format!("Farm order {}", order.order_id),
                         "external_id": external_id.clone()
                     },
@@ -3447,8 +3661,12 @@ pub async fn handle_checkout_nevermined(
     Path(order_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    tracing::info!("[FARM-NVM] Received Nevermined payment for order={}", order_id);
+    tracing::info!(
+        "[FARM-NVM] Received Nevermined payment for order={}",
+        order_id
+    );
 
+    let legacy_merchant_key_path = headers.get("x-nevermined-api-key").is_some();
     let token = headers
         .get("x-nevermined-access-token")
         .and_then(|v| v.to_str().ok())
@@ -3482,6 +3700,10 @@ pub async fn handle_checkout_nevermined(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())
         .filter(|s| !s.trim().is_empty());
+    let currency_header = headers
+        .get("x-zpi-currency")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| canonicalize_merchant_currency(Some(s)));
     let proof_id_header = headers
         .get("x-zpi-proof-id")
         .and_then(|v| v.to_str().ok())
@@ -3523,30 +3745,15 @@ pub async fn handle_checkout_nevermined(
         ));
     }
 
-    let server_base_url = std::env::var("SERVER_BASE_URL")
-        .unwrap_or_else(|_| {
-            let port = std::env::var("PORT").unwrap_or_else(|_| "8001".to_string());
-            format!("http://localhost:{}", port)
-        });
+    let server_base_url = std::env::var("SERVER_BASE_URL").unwrap_or_else(|_| {
+        let port = std::env::var("PORT").unwrap_or_else(|_| "8001".to_string());
+        format!("http://localhost:{}", port)
+    });
     let resource_url = format!("{}/farm/checkout-nevermined/{}", server_base_url, order_id);
 
     let plan_id_for_settle = plan_id_from_header
         .clone()
         .or_else(|| extract_plan_id_from_x402_token(&token));
-
-    verify_nevermined_token_if_configured(
-        &token,
-        order.total_cents,
-        &resource_url,
-        plan_id_for_settle.as_deref(),
-    )
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": e })),
-        )
-    })?;
 
     if let Some(expected_cents) = expected_amount_header {
         if expected_cents != order.total_cents {
@@ -3561,24 +3768,101 @@ pub async fn handle_checkout_nevermined(
         }
     }
 
+    if legacy_merchant_key_path {
+        tracing::warn!(
+            "[FARM-NVM] Legacy merchant-key checkout path bypassing strict verified_intents settlement gate; use preferred merchant-settles flow for P0-1 verification"
+        );
+    } else {
+        let external_id = external_id_header.as_deref().ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "Missing X-ZPI-External-Id for Nevermined merchant-settles checkout" })),
+            )
+        })?;
+        let proof_id = proof_id_header.as_deref().ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "Missing X-ZPI-Proof-Id for Nevermined merchant-settles checkout" })),
+            )
+        })?;
+        let settlement_currency =
+            currency_header.unwrap_or_else(|| canonicalize_merchant_currency(None));
+        {
+            let mut farm = state.write().await;
+            farm.prune_verified_intents();
+            let verified = farm.verified_intents.get(external_id).ok_or_else(|| {
+                (
+                    StatusCode::PAYMENT_REQUIRED,
+                    Json(json!({
+                        "error": "No prior merchant ZPI verification for this external_id",
+                        "external_id": external_id,
+                    })),
+                )
+            })?;
+            if verified.proof_id != proof_id
+                || verified.amount_cents != order.total_cents
+                || verified.merchant_url != resource_url
+                || verified.currency != settlement_currency
+            {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    Json(json!({
+                        "error": "Prior merchant verification does not match this settlement",
+                        "external_id": external_id,
+                        "expected": {
+                            "proof_id": verified.proof_id.as_str(),
+                            "amount_cents": verified.amount_cents,
+                            "currency": verified.currency.as_str(),
+                            "merchant_url": verified.merchant_url.as_str(),
+                        },
+                        "provided": {
+                            "proof_id": proof_id,
+                            "amount_cents": order.total_cents,
+                            "currency": settlement_currency.as_str(),
+                            "merchant_url": resource_url,
+                        }
+                    })),
+                ));
+            }
+        }
+    }
+
+    // Validate all local ZPI settlement invariants before Nevermined /verify.
+    // /verify can consume a one-shot x402 token, so local header/intent failures
+    // must fail closed without burning the user's payment credential.
+    verify_nevermined_token_if_configured(
+        &token,
+        order.total_cents,
+        &resource_url,
+        plan_id_for_settle.as_deref(),
+    )
+    .await
+    .map_err(|e| (StatusCode::UNAUTHORIZED, Json(json!({ "error": e }))))?;
+
     let tx_hash = settle_nevermined_token(
         &token,
         order.total_cents,
         &resource_url,
         plan_id_for_settle.as_deref(),
     )
-        .await
-        .map_err(|e| {
-            tracing::error!("[FARM-NVM] Settle failed — order NOT marked paid: {}", e);
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({ "error": format!("Payment settlement failed: {}", e) })),
-            )
-        })?
-        .unwrap_or_else(|| format!(
+    .await
+    .map_err(|e| {
+        tracing::error!("[FARM-NVM] Settle failed — order NOT marked paid: {}", e);
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": format!("Payment settlement failed: {}", e) })),
+        )
+    })?
+    .unwrap_or_else(|| {
+        format!(
             "nvm-{}",
-            uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("tx")
-        ));
+            uuid::Uuid::new_v4()
+                .to_string()
+                .split('-')
+                .next()
+                .unwrap_or("tx")
+        )
+    });
 
     {
         let mut state = state.write().await;
@@ -3636,7 +3920,11 @@ fn intersect_product_chains(db: &SharedMerchantDb, product_ids: &[&str]) -> Opti
     }
 
     // Validate against known chains
-    result.map(|ids| ids.into_iter().filter(|c| all_chain_ids.contains(c)).collect())
+    result.map(|ids| {
+        ids.into_iter()
+            .filter(|c| all_chain_ids.contains(c))
+            .collect()
+    })
 }
 
 fn cart_to_json(cart: &Cart) -> serde_json::Value {
@@ -3745,7 +4033,7 @@ pub fn farm_tool_definitions() -> Vec<serde_json::Value> {
         }),
         json!({
             "name": "checkout-with-credit-card",
-            "description": "Prepare checkout after proof validation. This merchant tool does NOT charge directly. It returns zpi-zkpay MCP arguments for pay-with-credit-card. After zpi-zkpay payment succeeds, call confirm-payment to finalize order status.",
+            "description": "Prepare VGS checkout after proof validation. This tool does NOT charge directly. It returns zpi-zkpay MCP arguments for checkout-with-credit-card. After zpi-zkpay payment succeeds, call confirm-payment to finalize order status.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -3802,17 +4090,17 @@ pub fn farm_tool_definitions() -> Vec<serde_json::Value> {
         }),
         json!({
             "name": "confirm-payment",
-            "description": "Finalize farm order after successful payment. Supports direct charge_bundle or zpi_response payloads and marks order as PAID.",
+            "description": "Finalize farm order after zpi-zkpay checkout-with-credit-card succeeds. Marks the order as PAID and stores transaction reference.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "order_id": {
                         "type": "string",
-                        "description": "Order ID returned from farm-checkout."
+                        "description": "Order ID returned from farm-checkout with payment_method='vgs_card'."
                     },
                     "payment_confirmed": {
                         "type": "boolean",
-                        "description": "Defaults to true when omitted. Set false only to explicitly abort confirmation."
+                        "description": "Must be true only after zpi-zkpay payment succeeded."
                     },
                     "transaction_ref": {
                         "type": "string",
@@ -3822,16 +4110,12 @@ pub fn farm_tool_definitions() -> Vec<serde_json::Value> {
                         "type": "string",
                         "description": "Optional external ID used for proof/idempotency."
                     },
-                    "charge_bundle": {
-                        "type": "string",
-                        "description": "Optional top-level JWE charge bundle from zpi-zkpay."
-                    },
                     "zpi_response": {
                         "type": "object",
-                        "description": "Optional full zpi-zkpay pay-with-credit-card response payload."
+                        "description": "Optional zpi-zkpay checkout-with-credit-card response payload."
                     }
                 },
-                "required": ["order_id"]
+                "required": ["order_id", "payment_confirmed"]
             }
         }),
         json!({
@@ -3883,6 +4167,10 @@ pub fn farm_tool_definitions() -> Vec<serde_json::Value> {
                     "verify_only": {
                         "type": "boolean",
                         "description": "When true, the merchant ONLY verifies the ZPI proof against the attester and records the result (no mint, no settle). Requires external_id + proof_id. Returns proof_id. Call this BEFORE asking zpi-zkpay to mint — zpi-zkpay confirms this verification before minting."
+                    },
+                    "currency": {
+                        "type": "string",
+                        "description": "ISO 4217 currency for ZPI amount/currency binding (e.g. USD). Trimmed and uppercased; defaults to USD when omitted. Must match checkout payment_details.currency and the spend proof witness."
                     }
                 },
                 "required": ["merchant_url", "amount", "description"]
@@ -3896,7 +4184,7 @@ pub fn farm_tool_definitions() -> Vec<serde_json::Value> {
                 "properties": {
                     "charge_bundle": {
                         "type": "string",
-                        "description": "JWE compact serialization returned by zpi-zkpay pay-with-credit-card."
+                        "description": "JWE compact serialization returned by zpi-zkpay checkout-with-credit-card."
                     },
                     "external_id": {
                         "type": "string",
@@ -3975,7 +4263,7 @@ FARM MERCHANT INSTRUCTIONS:
 10. If checkout-with-credit-card returns READY_FOR_ZPI_PAYMENT, call zpi-zkpay MCP tool
     pay-with-credit-card using zpi_arguments exactly as returned.
 11. After zpi-zkpay payment succeeds, call confirm-payment with
-    order_id (+ payment_confirmed=true when explicit) and either charge_bundle or zpi_response.
+    order_id + payment_confirmed=true (+ zpi_response when available).
 12. If pay-with-nevermined returns PROOF_MISMATCH, STOP and ask the user to confirm intent
     before generating a new proof.
 13. Available categories: dairy, meat, poultry, produce.
@@ -4413,15 +4701,18 @@ mod attester_http_tests {
         salt: &str,
     ) -> (String, String) {
         let program_id = "sha256:deadbeef".to_string();
-        let amount_hex = compute_field_commitment(
-            "total_amount",
-            &amount_cents.to_string(),
-            external_id,
-            salt,
-        );
+        let amount_hex =
+            compute_field_commitment("total_amount", &amount_cents.to_string(), external_id, salt);
         let amount_bytes = commitment_hex_to_bytes(&amount_hex);
-        let public_values_hex =
-            build_public_values_hex(external_id, vec![("total_amount".to_string(), amount_bytes)]);
+        let currency_hex = compute_field_commitment("currency", "USD", external_id, salt);
+        let currency_bytes = commitment_hex_to_bytes(&currency_hex);
+        let public_values_hex = build_public_values_hex(
+            external_id,
+            vec![
+                ("total_amount".to_string(), amount_bytes),
+                ("currency".to_string(), currency_bytes),
+            ],
+        );
         (public_values_hex, program_id)
     }
 
@@ -4711,23 +5002,19 @@ mod attester_http_tests {
 
         let app = Router::new().route(
             "/programs/:program_id/derive-salt",
-            get(|_: Path<String>, Query(q): Query<DeriveSaltQuery>| async move {
-                assert_eq!(q.external_id, EXTERNAL_ID);
-                Json(json!({ "derived_salt": SALT }))
-            }),
+            get(
+                |_: Path<String>, Query(q): Query<DeriveSaltQuery>| async move {
+                    assert_eq!(q.external_id, EXTERNAL_ID);
+                    Json(json!({ "derived_salt": SALT }))
+                },
+            ),
         );
         let base = spawn_mock_attester(app).await;
         let client = reqwest::Client::new();
 
-        run_zero_trust_proof_checks(
-            &client,
-            &base,
-            &material,
-            EXTERNAL_ID,
-            AMOUNT_CENTS,
-        )
-        .await
-        .expect("happy path should pass");
+        run_zero_trust_proof_checks(&client, &base, &material, EXTERNAL_ID, AMOUNT_CENTS, "USD")
+            .await
+            .expect("happy path should pass");
     }
 
     #[tokio::test]
@@ -4736,11 +5023,8 @@ mod attester_http_tests {
         const AMOUNT_CENTS: u64 = 500;
         const SALT: &str = "good-salt";
 
-        let (mut public_values_hex, program_id) =
-            build_bound_public_values(EXTERNAL_ID, AMOUNT_CENTS, SALT);
-        // Flip one hex nibble so the committed total_amount no longer matches recompute.
-        public_values_hex.pop();
-        public_values_hex.push('0');
+        let (public_values_hex, program_id) =
+            build_bound_public_values(EXTERNAL_ID, AMOUNT_CENTS + 1, SALT);
 
         let material = ProofMaterial {
             public_values_hex,
@@ -4764,6 +5048,7 @@ mod attester_http_tests {
             &material,
             EXTERNAL_ID,
             AMOUNT_CENTS,
+            "USD",
         )
         .await
         .unwrap_err();
@@ -4801,6 +5086,7 @@ mod attester_http_tests {
             &material,
             SETTLING_ID,
             AMOUNT_CENTS,
+            "USD",
         )
         .await
         .unwrap_err();
@@ -4818,10 +5104,8 @@ mod attester_http_tests {
 
         const EXTERNAL_ID: &str = "ext-no-amount";
 
-        let public_values_hex = build_public_values_hex(
-            EXTERNAL_ID,
-            vec![("currency".to_string(), [1u8; 32])],
-        );
+        let public_values_hex =
+            build_public_values_hex(EXTERNAL_ID, vec![("currency".to_string(), [1u8; 32])]);
         let material = ProofMaterial {
             public_values_hex,
             vk_hash: None,
@@ -4832,21 +5116,179 @@ mod attester_http_tests {
         let base = spawn_mock_attester(Router::new()).await;
         let client = reqwest::Client::new();
 
-        let err = run_zero_trust_proof_checks(
-            &client,
-            &base,
-            &material,
-            EXTERNAL_ID,
-            999,
-        )
-        .await
-        .unwrap_err();
+        let err = run_zero_trust_proof_checks(&client, &base, &material, EXTERNAL_ID, 999, "USD")
+            .await
+            .unwrap_err();
         assert!(err.contains("does not commit a `total_amount` field"));
 
         match original {
             Some(v) => std::env::set_var(VAR, v),
             None => std::env::remove_var(VAR),
         }
+    }
+
+    #[tokio::test]
+    async fn test_run_zero_trust_proof_checks_missing_currency_required() {
+        const EXTERNAL_ID: &str = "ext-no-currency";
+        const AMOUNT_CENTS: u64 = 999;
+        const SALT: &str = "salt";
+        let amount_hex =
+            compute_field_commitment("total_amount", &AMOUNT_CENTS.to_string(), EXTERNAL_ID, SALT);
+        let public_values_hex = build_public_values_hex(
+            EXTERNAL_ID,
+            vec![(
+                "total_amount".to_string(),
+                commitment_hex_to_bytes(&amount_hex),
+            )],
+        );
+        let material = ProofMaterial {
+            public_values_hex,
+            vk_hash: None,
+            program_id: Some("sha256:abc".into()),
+            field_commitments_meta: None,
+        };
+        let app = Router::new().route(
+            "/programs/:program_id/derive-salt",
+            get(|_: Path<String>, _: Query<DeriveSaltQuery>| async move {
+                Json(json!({ "derived_salt": SALT }))
+            }),
+        );
+        let base = spawn_mock_attester(app).await;
+        let client = reqwest::Client::new();
+
+        let err = run_zero_trust_proof_checks(
+            &client,
+            &base,
+            &material,
+            EXTERNAL_ID,
+            AMOUNT_CENTS,
+            "USD",
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("does not commit a `currency` field"));
+    }
+
+    #[test]
+    fn test_canonicalize_merchant_currency_lowercase_request() {
+        assert_eq!(canonicalize_merchant_currency(None), "USD");
+        assert_eq!(canonicalize_merchant_currency(Some("usd")), "USD");
+        assert_eq!(canonicalize_merchant_currency(Some("  eur ")), "EUR");
+    }
+
+    #[tokio::test]
+    async fn test_run_zero_trust_proof_checks_lowercase_request_currency_accepted() {
+        const EXTERNAL_ID: &str = "ext-currency-req";
+        const AMOUNT_CENTS: u64 = 1200;
+        const SALT: &str = "salt-req-usd";
+
+        let (public_values_hex, program_id) =
+            build_bound_public_values(EXTERNAL_ID, AMOUNT_CENTS, SALT);
+        let material = ProofMaterial {
+            public_values_hex,
+            vk_hash: None,
+            program_id: Some(program_id),
+            field_commitments_meta: None,
+        };
+
+        let app = Router::new().route(
+            "/programs/:program_id/derive-salt",
+            get(
+                |_: Path<String>, Query(q): Query<DeriveSaltQuery>| async move {
+                    assert_eq!(q.external_id, EXTERNAL_ID);
+                    Json(json!({ "derived_salt": SALT }))
+                },
+            ),
+        );
+        let base = spawn_mock_attester(app).await;
+        let client = reqwest::Client::new();
+
+        run_zero_trust_proof_checks(
+            &client,
+            &base,
+            &material,
+            EXTERNAL_ID,
+            AMOUNT_CENTS,
+            "usd",
+        )
+        .await
+        .expect("lowercase request currency should canonicalize to USD and match proof");
+    }
+
+    fn build_bound_public_values_with_currency(
+        external_id: &str,
+        amount_cents: u64,
+        currency: &str,
+        salt: &str,
+    ) -> (String, String) {
+        let program_id = "sha256:deadbeef".to_string();
+        let amount_hex =
+            compute_field_commitment("total_amount", &amount_cents.to_string(), external_id, salt);
+        let amount_bytes = commitment_hex_to_bytes(&amount_hex);
+        let currency_hex = compute_field_commitment("currency", currency, external_id, salt);
+        let currency_bytes = commitment_hex_to_bytes(&currency_hex);
+        let public_values_hex = build_public_values_hex(
+            external_id,
+            vec![
+                ("total_amount".to_string(), amount_bytes),
+                ("currency".to_string(), currency_bytes),
+            ],
+        );
+        (public_values_hex, program_id)
+    }
+
+    #[tokio::test]
+    async fn test_run_zero_trust_proof_checks_lowercase_proof_currency_rejected() {
+        const EXTERNAL_ID: &str = "ext-currency-proof";
+        const AMOUNT_CENTS: u64 = 800;
+        const SALT: &str = "salt-proof-usd";
+
+        let (public_values_hex, program_id) = build_bound_public_values_with_currency(
+            EXTERNAL_ID,
+            AMOUNT_CENTS,
+            "usd",
+            SALT,
+        );
+        let material = ProofMaterial {
+            public_values_hex,
+            vk_hash: None,
+            program_id: Some(program_id),
+            field_commitments_meta: None,
+        };
+
+        let app = Router::new().route(
+            "/programs/:program_id/derive-salt",
+            get(|_: Path<String>, _: Query<DeriveSaltQuery>| async move {
+                Json(json!({ "derived_salt": SALT }))
+            }),
+        );
+        let base = spawn_mock_attester(app).await;
+        let client = reqwest::Client::new();
+
+        let err = run_zero_trust_proof_checks(
+            &client,
+            &base,
+            &material,
+            EXTERNAL_ID,
+            AMOUNT_CENTS,
+            "USD",
+        )
+        .await
+        .unwrap_err();
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&err).expect("currency binding error should be structured JSON");
+        assert_eq!(parsed["status"], "PROOF_BINDING_FAILED");
+        assert_eq!(parsed["field"], "currency");
+        assert_eq!(parsed["merchant_canonical"], "USD");
+        assert!(parsed["hint"]
+            .as_str()
+            .unwrap_or("")
+            .contains("uppercase"));
+        assert!(parsed["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("currency commitment"));
     }
 
     #[tokio::test]
@@ -4858,6 +5300,7 @@ mod attester_http_tests {
                 "known-ext".into(),
                 crate::farm::state::VerifiedIntent {
                     amount_cents: 4321,
+                    currency: "USD".into(),
                     merchant_url: "https://merchant.example".into(),
                     proof_id: "attester-known".into(),
                     verified_at: std::time::SystemTime::now(),
@@ -4874,6 +5317,7 @@ mod attester_http_tests {
         assert_eq!(resp["verified"], true);
         assert_eq!(resp["external_id"], "known-ext");
         assert_eq!(resp["amount_cents"], 4321);
+        assert_eq!(resp["currency"], "USD");
         assert_eq!(resp["merchant_url"], "https://merchant.example");
         assert_eq!(resp["proof_id"], "attester-known");
         assert!(resp.get("verified_at_secs").is_some());
