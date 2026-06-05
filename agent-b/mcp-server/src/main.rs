@@ -495,7 +495,7 @@ async fn dispatch_farm_tool(
                 Err((_, axum::Json(r))) => r,
             }
         }
-        "farm-confirm-payment" => {
+        "settle-via-nevermined" => {
             let req: handlers::FarmConfirmPaymentRequest = serde_json::from_value(args_value).ok()?;
             match handlers::handle_farm_confirm_payment(State(farm_state), State(merchant_db), Json(req)).await {
                 Ok(axum::Json(r)) => r,
@@ -979,10 +979,9 @@ async fn main() -> Result<()> {
         .route("/internal/intent-verified", get(handlers::handle_intent_verified))
         .route("/tools/checkout-with-credit-card", post(handlers::handle_checkout_with_credit_card))
         .route("/tools/confirm-payment", post(handlers::handle_confirm_payment))
-        .route("/tools/farm-confirm-payment", post(handlers::handle_farm_confirm_payment))
+        .route("/tools/settle-via-nevermined", post(handlers::handle_farm_confirm_payment))
         .route("/tools/farm-clear-cart", post(handlers::handle_clear_cart))
         .route("/farm/checkout/:order_id", get(handlers::handle_checkout_verify))
-        .route("/farm/checkout-nevermined/:order_id", get(handlers::handle_checkout_nevermined))
         .route("/mcp", post(handle_mcp))
         // Merchant API
         .route("/api/merchant/status", get(handlers::handle_merchant_status))
@@ -1043,10 +1042,10 @@ async fn main() -> Result<()> {
     println!("  POST /tools/farm-add-to-cart    — Add to cart");
     println!("  POST /tools/farm-view-cart      — View cart");
     println!("  POST /tools/farm-checkout       — Checkout (x402/nevermined/vgs)");
-    println!("  POST /tools/pay-with-nevermined — Nevermined card pay (verify → mint → settle)");
+    println!("  POST /tools/pay-with-nevermined — Nevermined card pay (legacy verify/mint)");
+    println!("  POST /tools/settle-via-nevermined — Nevermined JWE settle (charge_bundle)");
     println!("  POST /tools/checkout-with-credit-card — VGS card checkout prep via zpi-zkpay");
     println!("  GET  /farm/checkout/:order_id   — x402 payment verify");
-    println!("  GET  /farm/checkout-nevermined/:order_id — Nevermined payment verify");
     println!("  POST /mcp                       — MCP protocol endpoint\n");
 
     // ── Nevermined config summary ─────────────────────────────────────
@@ -1093,4 +1092,41 @@ async fn main() -> Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::is_sensitive_key;
+
+    #[test]
+    fn is_sensitive_key_matches_branch_redaction_rules() {
+        for key in [
+            "code",
+            "access_token",
+            "refresh_token",
+            "authorization",
+            "api_key",
+            "merchant_apikey",
+            "client_secret",
+            "password",
+            "private_key",
+            "privatekey",
+            "encoded_payload",
+            "cryptogram",
+            "charge_bundle",
+            "chargeBundle",
+            "card_number",
+            "cardnumber",
+            "cvv",
+            "cvc",
+            "pan",
+            "dpan",
+        ] {
+            assert!(is_sensitive_key(key), "expected sensitive: {key}");
+        }
+
+        for key in ["order_id", "amount", "currency", "status", "external_id"] {
+            assert!(!is_sensitive_key(key), "expected non-sensitive: {key}");
+        }
+    }
 }

@@ -19,6 +19,7 @@ pub struct PendingNeverminedPayment {
 #[derive(Clone, Debug)]
 pub struct VerifiedIntent {
     pub amount_cents: u64,
+    pub currency: String,
     pub merchant_url: String,
     /// Canonical proof UUID stored by zk-attestation-service.
     pub proof_id: String,
@@ -105,6 +106,7 @@ mod tests {
             "fresh-ext".into(),
             VerifiedIntent {
                 amount_cents: 100,
+                currency: "USD".into(),
                 merchant_url: "https://fresh.example".into(),
                 proof_id: "attester-fresh".into(),
                 verified_at: now,
@@ -114,6 +116,7 @@ mod tests {
             "stale-ext".into(),
             VerifiedIntent {
                 amount_cents: 200,
+                currency: "USD".into(),
                 merchant_url: "https://stale.example".into(),
                 proof_id: "attester-stale".into(),
                 verified_at: stale_at,

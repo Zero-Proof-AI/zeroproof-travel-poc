@@ -529,4 +529,64 @@ mod tests {
         // updated_at should be >= before (may be same second in fast tests)
         assert!(after >= before);
     }
+
+    #[test]
+    fn public_proof_id_prefers_attester_over_zpi() {
+        let row = OrderRow {
+            order_id: "ord-proof".into(),
+            session_id: "sess-proof".into(),
+            items_json: "[]".into(),
+            total_cents: 100,
+            status: "paid".into(),
+            payment_method: "nevermined".into(),
+            tx_hash: None,
+            network: None,
+            external_id: Some("ext-1".into()),
+            zpi_proof_id: Some("zkp-local".into()),
+            attester_proof_id: Some("attester-uuid".into()),
+            created_at: "2026-01-01".into(),
+            updated_at: "2026-01-01".into(),
+        };
+        assert_eq!(row.public_proof_id(), Some("attester-uuid"));
+    }
+
+    #[test]
+    fn public_proof_id_falls_back_to_zpi() {
+        let row = OrderRow {
+            order_id: "ord-proof".into(),
+            session_id: "sess-proof".into(),
+            items_json: "[]".into(),
+            total_cents: 100,
+            status: "paid".into(),
+            payment_method: "nevermined".into(),
+            tx_hash: None,
+            network: None,
+            external_id: None,
+            zpi_proof_id: Some("zkp-only".into()),
+            attester_proof_id: None,
+            created_at: "2026-01-01".into(),
+            updated_at: "2026-01-01".into(),
+        };
+        assert_eq!(row.public_proof_id(), Some("zkp-only"));
+    }
+
+    #[test]
+    fn public_proof_id_none_when_both_absent() {
+        let row = OrderRow {
+            order_id: "ord-proof".into(),
+            session_id: "sess-proof".into(),
+            items_json: "[]".into(),
+            total_cents: 100,
+            status: "pending_payment".into(),
+            payment_method: "nevermined".into(),
+            tx_hash: None,
+            network: None,
+            external_id: None,
+            zpi_proof_id: None,
+            attester_proof_id: None,
+            created_at: "2026-01-01".into(),
+            updated_at: "2026-01-01".into(),
+        };
+        assert_eq!(row.public_proof_id(), None);
+    }
 }
