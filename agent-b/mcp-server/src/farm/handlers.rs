@@ -15,6 +15,7 @@ use super::db::SharedMerchantDb;
 use super::enrollment::ZkpayClient;
 use super::state::SharedFarmState;
 use super::x402::{self, X402Config};
+use url::Url;
 
 // ── Request / Response types ─────────────────────────────────────
 
@@ -59,6 +60,31 @@ fn default_payment_method() -> String {
 #[derive(Debug, Deserialize)]
 pub struct ClearCartRequest {
     pub session_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PayWithNeverminedRequest {
+    pub merchant_url: String,
+    pub amount: f64,
+    pub description: String,
+    #[serde(default)]
+    pub external_id: Option<String>,
+    #[serde(default)]
+    pub zpi_proof: Option<String>,
+    #[serde(default)]
+    pub proof_id: Option<String>,
+    #[serde(default)]
+    pub x402_access_token: Option<String>,
+    #[serde(default)]
+    pub payload_encoded: Option<String>,
+    #[serde(default)]
+    pub plan_id: Option<String>,
+    #[serde(default)]
+    pub token_ref: Option<String>,
+    #[serde(default)]
+    pub verify_only: Option<bool>,
+    #[serde(default)]
+    pub currency: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -182,6 +208,16 @@ impl FarmToolResponse {
         }
     }
 
+    pub fn err_with_data(status: u16, error: String, data: serde_json::Value) -> Self {
+        Self {
+            success: false,
+            data: Some(data),
+            error: Some(error),
+            status_code: Some(status),
+            payment_required: None,
+        }
+    }
+
     pub fn payment_required(payment_required: serde_json::Value, order_data: serde_json::Value) -> Self {
         Self {
             success: false,
@@ -199,6 +235,38 @@ fn format_dollars(cents: u64) -> String {
 
 fn generate_external_id() -> String {
     uuid::Uuid::new_v4().to_string()
+}
+
+fn amount_to_cents(amount: f64) -> Result<u64, String> {
+    if !amount.is_finite() || amount <= 0.0 {
+        return Err("amount must be a positive number".into());
+    }
+    Ok((amount * 100.0).round() as u64)
+}
+
+fn allowed_merchant_host(url: &str) -> Result<(), String> {
+    let parsed = Url::parse(url).map_err(|e| format!("merchant_url is invalid: {}", e))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "merchant_url must include a host".to_string())?
+        .to_lowercase();
+
+    let raw_allowlist = std::env::var("NEVERMINED_MERCHANT_ALLOWLIST")
+        .unwrap_or_else(|_| "localhost,127.0.0.1".to_string());
+
+    let allowed = raw_allowlist
+        .split(',')
+        .map(|h| h.trim().to_lowercase())
+        .any(|h| !h.is_empty() && h == host);
+
+    if allowed {
+        Ok(())
+    } else {
+        Err(format!(
+            "merchant_url host '{}' is not in NEVERMINED_MERCHANT_ALLOWLIST",
+            host
+        ))
+    }
 }
 
 fn nevermined_http_trace_enabled() -> bool {
@@ -365,6 +433,219 @@ fn resolve_merchant_bearer(token: &str) -> String {
     }
     token.to_string()
 }
+
+async fn mint_nevermined_access_token(
+    api_key: &str,
+    amount_cents: u64,
+    resource_url: &str,
+) -> Result<String, String> {
+    // NVM Pay flow: POST /access-token/from-nvm-key
+    // You can override NEVERMINED_TOKEN_URL per environment if needed.
+    let token_url = std::env::var("NEVERMINED_TOKEN_URL").ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "https://pay.nevermined.app/api/access-token/from-nvm-key".to_string());
+
+    let max_attempts = std::env::var("NEVERMINED_TOKEN_MAX_RETRIES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v >= 1)
+        .unwrap_or(3);
+    let base_backoff_ms = std::env::var("NEVERMINED_TOKEN_RETRY_BACKOFF_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v >= 100)
+        .unwrap_or(1000);
+
+    let danger_tls = std::env::var("NEVERMINED_DANGER_ACCEPT_INVALID_CERTS")
+        .ok()
+        .map(|v| v.trim().eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(danger_tls)
+        .build()
+        .map_err(|e| format!("failed to build HTTP client: {}", e))?;
+    let amount = format!("{:.2}", amount_cents as f64 / 100.0);
+    let pay_to = std::env::var("NEVERMINED_PAY_TO").unwrap_or_else(|_| "agent-b-farm".to_string());
+    let mandate_id = std::env::var("NEVERMINED_MANDATE_ID").ok().filter(|v| !v.trim().is_empty());
+    let scheme = std::env::var("NEVERMINED_SCHEME").ok().filter(|v| !v.trim().is_empty());
+    let network = std::env::var("NEVERMINED_NETWORK").ok().filter(|v| !v.trim().is_empty());
+    let plan_id = std::env::var("NEVERMINED_PLAN_ID").ok().filter(|v| !v.trim().is_empty());
+    let agent_id_for_token = std::env::var("NEVERMINED_AGENT_ID").ok().filter(|v| !v.trim().is_empty());
+    let http_trace = nevermined_http_trace_enabled();
+
+    // Build request body once — cloned per retry attempt.
+    // visa  (visa.nevermined.dev /api/access-token/from-nvm-key): { amount } only — backend resolves mandate from NVM key.
+    // New API (api.{env}.nevermined.app /api/v1/x402/permissions): accepted / resource / delegationConfig.
+    // Old API (pay.nevermined.app /api/access-token/from-nvm-key): amount / resource / payTo / mandateId.
+    let request_body = match scheme.as_deref() {
+        Some("visa") => {
+            // Visa backend resolves mandate from the NVM API key — only amount is required.
+            json!({ "amount": amount })
+        }
+        Some(scheme_val) => {
+            // SDK body: { accepted: { scheme, network, planId, extra: { agentId } }, delegationConfig: { delegationId } }
+            // No `resource` field — that's only in the PaymentRequired challenge, not the token request.
+            let mut accepted = json!({
+                "scheme": scheme_val,
+                "network": network.as_deref().unwrap_or("stripe"),
+            });
+            if let Some(ref pid) = plan_id {
+                accepted["planId"] = json!(pid);
+            }
+            if let Some(ref aid) = agent_id_for_token {
+                accepted["extra"] = json!({ "agentId": aid });
+            }
+            let mut b = json!({ "accepted": accepted });
+            if let Some(ref mid) = mandate_id {
+                b["delegationConfig"] = json!({ "delegationId": mid });
+            }
+            b
+        }
+        None => {
+            // Legacy format used by pay.nevermined.app/api/access-token/from-nvm-key
+            let mut b = json!({
+                "amount": amount,
+                "resource": resource_url,
+                "payTo": pay_to
+            });
+            if let Some(ref mid) = mandate_id {
+                b["mandateId"] = json!(mid);
+            }
+            b
+        }
+    };
+
+    // Nevermined NVM Pay expects the full prefixed key (e.g. "live:..." / "sandbox:...").
+    let auth_api_key = api_key;
+
+    let mut last_error: Option<String> = None;
+    let mut attempts_made: usize = 0;
+
+    for attempt in 1..=max_attempts {
+        attempts_made = attempt;
+        let body = request_body.clone();
+
+        if http_trace {
+            let redacted_body = redact_json_value(&body);
+            tracing::info!(
+                "[FARM-NVM][HTTP][REQUEST] method=POST url={} attempt={}/{} headers={{Authorization: Bearer {}, Content-Type: application/json}} body={}",
+                token_url,
+                attempt,
+                max_attempts,
+                redact_secret(auth_api_key),
+                redacted_body
+            );
+        }
+
+        let resp_result = client
+            .post(&token_url)
+            .header("Authorization", format!("Bearer {}", auth_api_key))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await;
+
+        match resp_result {
+            Ok(resp) => {
+                let status = resp.status();
+                let raw_body = resp.text().await.unwrap_or_default();
+
+                if http_trace {
+                    tracing::info!(
+                        "[FARM-NVM][HTTP][RESPONSE] method=POST url={} attempt={}/{} status={} body={}",
+                        token_url,
+                        attempt,
+                        max_attempts,
+                        status,
+                        redact_body_text(&raw_body)
+                    );
+                }
+
+                if status.is_success() {
+                    let body =
+                        serde_json::from_str::<serde_json::Value>(&raw_body).map_err(|e| {
+                            format!(
+                                "failed to parse Nevermined token response: {}; raw={}",
+                                e,
+                                redact_body_text(&raw_body)
+                            )
+                        })?;
+
+                    // NVM Pay responses vary by endpoint; accept common token field names.
+                    // v2 x402 shape returns payloadEncoded (base64) — prefer that.
+                    let token_val = body
+                        .get("payloadEncoded")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .or_else(|| {
+                            body.get("accessToken")
+                                .or_else(|| body.get("access_token"))
+                                .or_else(|| body.get("token"))
+                                .or_else(|| body.get("payment_token"))
+                                .or_else(|| body.get("x402_token"))
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                        });
+                    return token_val.ok_or_else(|| {
+                        format!(
+                            "Nevermined token response did not include a token field. Response: {}",
+                            redact_json_value(&body)
+                        )
+                    });
+                }
+
+                let retryable = matches!(status.as_u16(), 429 | 502 | 503 | 504);
+                last_error = Some(format!(
+                    "Nevermined token exchange failed: status={} body={}",
+                    status,
+                    redact_body_text(&raw_body)
+                ));
+
+                if retryable && attempt < max_attempts {
+                    let delay = base_backoff_ms * attempt as u64;
+                    tracing::warn!(
+                        "[FARM-NVM] token endpoint retryable error (attempt {}/{}): status={} — retrying in {}ms",
+                        attempt,
+                        max_attempts,
+                        status,
+                        delay
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                    continue;
+                }
+
+                break;
+            }
+            Err(e) => {
+                let network_err = format!(
+                    "failed to call Nevermined token endpoint {}: {} ({:?})",
+                    token_url, e, e
+                );
+                last_error = Some(network_err.clone());
+                if attempt < max_attempts {
+                    let delay = base_backoff_ms * attempt as u64;
+                    tracing::warn!(
+                        "[FARM-NVM] token endpoint network error (attempt {}/{}): {} — retrying in {}ms",
+                        attempt,
+                        max_attempts,
+                        network_err,
+                        delay
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                    continue;
+                }
+                break;
+            }
+        }
+    }
+
+    Err(format!(
+        "Nevermined token endpoint unavailable after {} attempt(s). {}. You can retry shortly or switch to x402_crypto.",
+        attempts_made,
+        last_error.unwrap_or_else(|| "unknown error".to_string())
+    ))
+}
+
 
 async fn verify_nevermined_token_if_configured(
     token: &str,
@@ -846,6 +1127,26 @@ fn proof_binding_error(field: &str, merchant_canonical: &str, hint: &str, messag
             "[FARM-NVM][ZPI] {field} binding FAILED — {message} (merchant canonical: {merchant_canonical}; hint: {hint})"
         )
     })
+}
+
+fn proof_verification_error_response(status: u16, error: String) -> FarmToolResponse {
+    if let Ok(data) = serde_json::from_str::<serde_json::Value>(&error) {
+        let message = data
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("proof verification failed")
+            .to_string();
+        FarmToolResponse::err_with_data(status, message, data)
+    } else {
+        FarmToolResponse::err(status, error)
+    }
+}
+
+fn proof_id_from_request(req: &PayWithNeverminedRequest) -> Option<&str> {
+    req.proof_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
 }
 
 /// Verify a ZPI proof against the zk-attestation-service (zero-trust).
@@ -1867,6 +2168,7 @@ pub async fn handle_pay_with_nevermined(
                 merchant_url: req.merchant_url.clone(),
                 amount_cents,
                 description: req.description.clone(),
+                order_id: String::new(),
             },
         );
 
@@ -1937,6 +2239,7 @@ pub async fn handle_pay_with_nevermined(
                     merchant_url: req.merchant_url.clone(),
                     amount_cents,
                     description: req.description.clone(),
+                    order_id: pending.order_id.clone(),
                 },
             );
 
@@ -2513,6 +2816,8 @@ pub async fn handle_confirm_payment(
                                 .unwrap_or("short");
                             let cavv = payload.get("cavv").and_then(|v| v.as_str());
                             let eci = payload.get("eci").and_then(|v| v.as_str());
+                            let ds_trans_id =
+                                payload.get("dsTransId").and_then(|v| v.as_str());
                             let bundle_merchant_id = payload
                                 .get("merchant_id")
                                 .and_then(|v| v.as_str())
@@ -2540,6 +2845,7 @@ pub async fn handle_confirm_payment(
                                 bundle_merchant_id,
                                 cavv,
                                 eci,
+                                ds_trans_id,
                             )
                             .await
                             {
@@ -3433,7 +3739,7 @@ pub async fn handle_checkout(
         let amount_cents = order.total_cents;
         // Merchant identifier the merchant registers its public key under — same
         // id used by the VGS flow so ZPI-ZKPay can look up the merchant's JWK.
-        let merchant_id = std::env::var("ZPI_VGS_MERCHANT_ID")
+        let merchant_id = std::env::var("VGS_MERCHANT_ID")
             .unwrap_or_else(|_| "test-merchant-p2".to_string());
 
         state.pending_nevermined.insert(
@@ -3796,7 +4102,7 @@ pub fn farm_tool_definitions() -> Vec<serde_json::Value> {
         }),
         json!({
             "name": "farm-checkout",
-            "description": "Checkout the cart. Supports x402 crypto, Nevermined card demo flow, or VGS card flow. x402 returns HTTP 402 payment challenge. nevermined_card returns NEEDS_INTENT_PROOF with a canonical UUIDv4 external_id plus merchant_id; follow FARM_INSTRUCTIONS step 8 (chp_save → zpi_prove_intent → zpi-zkpay pay-with-nevermined returns a charge_bundle → settle-via-nevermined to settle). vgs_card returns a proof step and follow-up tool call.",
+            "description": "Checkout the cart. Supports x402 crypto, Nevermined card demo flow, or VGS card flow. x402 returns HTTP 402 payment challenge. nevermined_card returns NEEDS_INTENT_PROOF with a canonical UUIDv4 external_id plus merchant_id; follow FARM_INSTRUCTIONS step 8 (chp_save → prove_intent → zpi-zkpay pay-with-nevermined returns a charge_bundle → settle-via-nevermined to settle). vgs_card returns a proof step and follow-up tool call.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

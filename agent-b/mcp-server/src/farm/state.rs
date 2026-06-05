@@ -10,6 +10,9 @@ pub struct PendingNeverminedPayment {
     pub merchant_url: String,
     pub amount_cents: u64,
     pub description: String,
+    /// Farm order this intent belongs to. Lets `settle-via-nevermined` resolve
+    /// the order to mark paid from the decrypted `charge_bundle`'s `external_id`.
+    pub order_id: String,
 }
 
 /// Records that the merchant independently verified a ZPI proof for an
