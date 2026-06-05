@@ -2016,7 +2016,7 @@ pub async fn handle_intent_verified(
         None => Json(json!({
             "verified": false,
             "external_id": external_id,
-            "reason": "no merchant verification on record (call pay-with-nevermined with verify_only=true first, or it expired)",
+            "reason": "no merchant verification on record (record may have expired; the preferred Nevermined flow uses zpi-zkpay pay-with-nevermined then settle-via-nevermined)",
         })),
     }
 }
@@ -2047,7 +2047,7 @@ pub async fn handle_pay_with_nevermined(
                 StatusCode::BAD_REQUEST,
                 Json(FarmToolResponse::err(
                     400,
-                    "external_id is required for verify_only".to_string(),
+                    "external_id is required".to_string(),
                 )),
             )
         })?;
@@ -2056,7 +2056,7 @@ pub async fn handle_pay_with_nevermined(
                 StatusCode::BAD_REQUEST,
                 Json(FarmToolResponse::err(
                     400,
-                    "proof_id is required for verify_only so the merchant can verify the proof against the attester".to_string(),
+                    "proof_id is required so the merchant can verify the proof against the attester".to_string(),
                 )),
             )
         })?;
@@ -2065,7 +2065,7 @@ pub async fn handle_pay_with_nevermined(
                 StatusCode::BAD_REQUEST,
                 Json(FarmToolResponse::err(
                     400,
-                    "proof_id is required for verify_only so the merchant can verify the proof against the attester".to_string(),
+                    "proof_id is required so the merchant can verify the proof against the attester".to_string(),
                 )),
             ));
         }
@@ -2116,7 +2116,7 @@ pub async fn handle_pay_with_nevermined(
             "amount_cents": amount_cents,
             "currency": canonical_currency,
             "merchant_url": req.merchant_url,
-            "instructions": "Merchant verified the ZPI proof. Now call zpi-zkpay pay-with-nevermined-merchant-settles Phase 2 (same external_id + proof_id) to mint — only after this INTENT_VERIFIED. Then call this tool again with token_ref + plan_id + external_id + proof_id to settle."
+            "instructions": "Legacy verification recorded. Prefer the current flow: zpi-zkpay pay-with-nevermined { amount, currency, merchant_id, external_id, merchant_url } → charge_bundle, then settle-via-nevermined { charge_bundle, external_id }."
         }))));
     }
 
@@ -2166,7 +2166,7 @@ pub async fn handle_pay_with_nevermined(
                 "description": req.description,
                 "payment_processor": "nevermined"
             },
-            "instructions": "LEGACY ENTRYPOINT ONLY — after merchant checkout, follow the merchant-settles flow instead. Preferred flow: (1) zpi-zkpay pay-with-nevermined-merchant-settles Phase 1 with this external_id (no proof_id) to seed zkpay; (2) chp_save + prove_intent(intent_type='spend') + poll for proof_id; (3) call this merchant tool with verify_only=true + external_id + proof_id so the merchant returns INTENT_VERIFIED; (4) zpi-zkpay Phase 2 mint; (5) call this merchant tool with token_ref + plan_id + external_id + proof_id to settle. LEGACY fallback: call pay-with-nevermined again with zpi_proof + external_id (merchant mints using its own NVM_API_KEY)."
+            "instructions": "Legacy agent-b endpoint — prefer farm-checkout (nevermined_card) instead. Current flow: (1) farm-checkout returns NEEDS_INTENT_PROOF + external_id; (2) chp_save + prove_intent(this external_id, intent_type='spend'); (3) zpi-zkpay pay-with-nevermined { amount, currency, merchant_id, external_id, merchant_url } → charge_bundle (poll zpi_get_zkp_status if proof_not_ready/PENDING_PROOF, then retry); (4) settle-via-nevermined { charge_bundle, external_id }. Legacy fallback for this tool: call again with zpi_proof + external_id (merchant mints using NVM_API_KEY)."
         }))));
     }
 
@@ -2248,7 +2248,7 @@ pub async fn handle_pay_with_nevermined(
             StatusCode::BAD_REQUEST,
             Json(FarmToolResponse::err(
                 400,
-                "proof_id is required when token_ref or legacy x402 token fields are supplied so the merchant can verify the ZPI intent proof against the attester".to_string(),
+                "proof_id is required when legacy x402 token fields are supplied so the merchant can verify the ZPI intent proof against the attester".to_string(),
             )),
         ));
     }
@@ -2349,7 +2349,7 @@ pub async fn handle_pay_with_nevermined(
     let (payment_credential, x_nevermined_api_key, token_supplied_by_zkpay) = match supplied_token {
         Some(token) => {
             tracing::info!(
-                "[FARM-NVM] Using x402 token resolved from token_ref or legacy fallback (mint skipped) external_id={} token={}",
+                "[FARM-NVM] Using x402 token resolved from legacy relay fields (mint skipped) external_id={} token={}",
                 external_id,
                 redact_secret(&token)
             );
@@ -2357,9 +2357,8 @@ pub async fn handle_pay_with_nevermined(
         }
         None => {
             tracing::warn!(
-                "[FARM-NVM] No token_ref or raw x402 token supplied — falling back to legacy mint via NVM_API_KEY. \
-                 Update Claude's flow to call zpi-zkpay's pay-with-nevermined-merchant-settles first \
-                 and forward token_ref + plan_id here. external_id={}",
+                "[FARM-NVM] No x402 token supplied — falling back to legacy mint via NVM_API_KEY. \
+                 Prefer zpi-zkpay pay-with-nevermined then settle-via-nevermined instead of this endpoint. external_id={}",
                 external_id
             );
             let nvm_api_key = std::env::var("NVM_API_KEY").map_err(|_| {
@@ -2367,7 +2366,7 @@ pub async fn handle_pay_with_nevermined(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(FarmToolResponse::err(
                         500,
-                        "token_ref/x402 token is missing and NVM_API_KEY is not set — cannot proceed".to_string(),
+                        "x402 token is missing and NVM_API_KEY is not set — cannot proceed. Prefer zpi-zkpay pay-with-nevermined then settle-via-nevermined.".to_string(),
                     )),
                 )
             })?;
@@ -4174,7 +4173,7 @@ pub fn farm_tool_definitions() -> Vec<serde_json::Value> {
         }),
         json!({
             "name": "pay-with-nevermined",
-            "description": "Complete a Nevermined merchant-settles card payment. Preferred flow: merchant checkout external_id -> zpi-zkpay merchant-settles Phase 1 seed -> ZPI proof -> this tool with verify_only=true -> zpi-zkpay Phase 2 mint -> this tool settle. This tool is used twice in the preferred flow: first with verify_only=true + external_id + proof_id to record INTENT_VERIFIED before mint, then with token_ref + plan_id + external_id + proof_id to settle. LEGACY FLOW: calling without token/proof returns NEEDS_INTENT_PROOF; calling with external_id + zpi_proof mints internally using the merchant's NVM_API_KEY env var.",
+            "description": "Legacy agent-b Nevermined payment endpoint. Prefer the current flow: farm-checkout (nevermined_card) → chp_save + prove_intent → zpi-zkpay pay-with-nevermined { amount, currency, merchant_id, external_id, merchant_url } → charge_bundle → settle-via-nevermined { charge_bundle, external_id }. Legacy behavior: calling without token/proof returns NEEDS_INTENT_PROOF; calling with external_id + zpi_proof mints internally using the merchant's NVM_API_KEY env var.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -4192,7 +4191,7 @@ pub fn farm_tool_definitions() -> Vec<serde_json::Value> {
                     },
                     "external_id": {
                         "type": "string",
-                        "description": "UUIDv4 external_id from farm-checkout NEEDS_INTENT_PROOF. Required for verify_only and settle calls."
+                        "description": "UUIDv4 external_id from farm-checkout NEEDS_INTENT_PROOF. Reuse the same id across zpi-zkpay pay-with-nevermined and settle-via-nevermined."
                     },
                     "zpi_proof": {
                         "type": "string",
@@ -4204,23 +4203,23 @@ pub fn farm_tool_definitions() -> Vec<serde_json::Value> {
                     },
                     "token_ref": {
                         "type": "string",
-                        "description": "Short opaque ref (e.g. tref-…) from zpi-zkpay's pay-with-nevermined-merchant-settles response. Preferred settlement input — the merchant fetches the full token from ZPI-ZKPay over localhost, eliminating relay corruption."
+                        "description": "Legacy parameter from the old merchant-settles flow. Prefer settle-via-nevermined with charge_bundle instead."
                     },
                     "plan_id": {
                         "type": "string",
-                        "description": "Nevermined planId from zpi-zkpay's payment_required.accepts[0].planId. Required for preferred token_ref settlement because the merchant's own NVM key (if any) charges against a different plan."
+                        "description": "Legacy Nevermined planId. Not used by settle-via-nevermined, which takes charge_bundle + external_id only."
                     },
                     "x402_access_token": {
                         "type": "string",
-                        "description": "Legacy/manual fallback raw x402 token. Preferred flow uses token_ref so Claude does not relay raw token strings."
+                        "description": "Legacy/manual fallback raw x402 token. Prefer zpi-zkpay pay-with-nevermined → settle-via-nevermined."
                     },
                     "payload_encoded": {
                         "type": "string",
-                        "description": "Legacy/manual fallback x402 payload_encoded. Preferred flow uses token_ref."
+                        "description": "Legacy/manual fallback x402 payload_encoded. Prefer zpi-zkpay pay-with-nevermined → settle-via-nevermined."
                     },
                     "verify_only": {
                         "type": "boolean",
-                        "description": "When true, the merchant ONLY verifies the ZPI proof against the attester and records the result (no mint, no settle). Requires external_id + proof_id. Returns proof_id. Call this BEFORE asking zpi-zkpay to mint — zpi-zkpay confirms this verification before minting."
+                        "description": "Deprecated legacy flag. Use zpi-zkpay pay-with-nevermined then settle-via-nevermined instead."
                     },
                     "currency": {
                         "type": "string",
@@ -4296,7 +4295,7 @@ FARM MERCHANT INSTRUCTIONS:
        every later step; do not create another.
     b. Call chp_save, then prove_intent with the same external_id and intent_type='spend'.
     c. Call zpi-zkpay pay-with-nevermined with { amount: amount_cents, currency, merchant_id,
-       external_id } (exactly the checkout next_action.arguments). It mints the x402 token and
+       external_id, merchant_url } (exactly the checkout next_action.arguments). It mints the x402 token and
        returns an encrypted charge_bundle JWE. If pay-with-nevermined returns
        proof_not_ready/PENDING_PROOF, poll zpi_get_zkp_status until READY then retry
        pay-with-nevermined; otherwise proceed.
