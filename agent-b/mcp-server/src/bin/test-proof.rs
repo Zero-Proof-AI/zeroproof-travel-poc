@@ -77,7 +77,7 @@ async fn main() {
         }
     } else {
         println!("  ❌ No 'onchainProof' wrapper - proof is direct format");
-        if let Some(claim_info) = proof_data.get("claimInfo") {
+        if proof_data.get("claimInfo").is_some() {
             println!("    ✅ claimInfo exists (direct)");
         }
     }

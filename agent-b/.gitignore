@@ -1,1 +1,4 @@
 /target
+
+# Local farm demo SQLite (created at runtime by mcp-server)
+mcp-server/farm.db
