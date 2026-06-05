@@ -271,23 +271,13 @@ fn allowed_merchant_host(url: &str) -> Result<(), String> {
 
 fn nevermined_http_trace_enabled() -> bool {
     std::env::var("NEVERMINED_HTTP_TRACE")
-        .map(|v| {
-            matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(false)
 }
 
 fn nevermined_verify_legacy_retry_enabled() -> bool {
     std::env::var("NEVERMINED_VERIFY_LEGACY_RETRY")
-        .map(|v| {
-            !matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "0" | "false" | "no" | "off"
-            )
-        })
+        .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"))
         .unwrap_or(true)
 }
 
@@ -363,8 +353,6 @@ fn default_nevermined_verify_url() -> String {
     }
 }
 
-/// Extract the `jti` (plan ID) from a Nevermined API key JWT.
-/// The key has the form `sandbox:header.payload.sig` or plain `header.payload.sig`.
 fn extract_nvm_plan_id(nvm_api_key: &str) -> Option<String> {
     // Strip optional "sandbox:" / "live:" prefix
     let jwt_part = nvm_api_key.splitn(2, ':').last().unwrap_or(nvm_api_key);
@@ -383,12 +371,6 @@ fn extract_nvm_plan_id(nvm_api_key: &str) -> Option<String> {
     v.get("jti").and_then(|j| j.as_str()).map(|s| s.to_string())
 }
 
-/// Decode a base64(url) x402 access token envelope and pull out `accepted.planId`.
-///
-/// The envelope is `{ x402Version, accepted: { scheme, network, planId, extra },
-/// payload: { token: <inner_jwt> } }`. Used when ZPI-ZKPay supplies the token
-/// but no explicit plan_id — the merchant's NVM key (if any) charges against
-/// the wrong plan in this flow, so the token's own planId is authoritative.
 fn extract_plan_id_from_x402_token(token: &str) -> Option<String> {
     let padded = {
         let n = token.len();
@@ -3975,21 +3957,8 @@ pub async fn handle_checkout_verify(
     })))
 }
 
-// NOTE: The legacy `GET /farm/checkout-nevermined/:order_id` handler
-// (`handle_checkout_nevermined`) has been removed. It was the pre-JWE
-// direct verify+settle path (driven by `x-nevermined-*` headers / the legacy
-// merchant-key flow). Nevermined settlement now flows exclusively through the
-// `settle-via-nevermined` MCP tool, which decrypts the JWE `charge_bundle`,
-// optionally re-checks the ZPI proof, and then verifies + settles the x402
-// token. The `/farm/checkout-nevermined/:order_id` URL is still used as the
-// x402 `resource` identifier minted into the token, but is no longer a live
-// endpoint.
-
-// ── Helpers ──────────────────────────────────────────────────────
-
-/// Compute the intersection of enabled chain IDs across all given products.
-/// Returns None if ALL products have no saved prefs (meaning all chains OK).
-/// Returns Some(vec) with the intersected set otherwise.
+/// Nevermined card-payment verification endpoint.
+/// pay-with-nevermined calls this with a short-lived Nevermined access token.
 fn intersect_product_chains(db: &SharedMerchantDb, product_ids: &[&str]) -> Option<Vec<u64>> {
     use super::enrollment::SUPPORTED_CHAINS;
 
@@ -4009,11 +3978,7 @@ fn intersect_product_chains(db: &SharedMerchantDb, product_ids: &[&str]) -> Opti
     }
 
     // Validate against known chains
-    result.map(|ids| {
-        ids.into_iter()
-            .filter(|c| all_chain_ids.contains(c))
-            .collect()
-    })
+    result.map(|ids| ids.into_iter().filter(|c| all_chain_ids.contains(c)).collect())
 }
 
 fn cart_to_json(cart: &Cart) -> serde_json::Value {
