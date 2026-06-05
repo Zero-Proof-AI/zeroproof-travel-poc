@@ -479,16 +479,16 @@ async fn dispatch_farm_tool(
                 Err((_, axum::Json(r))) => r,
             }
         }
-        "pay-with-vgs-credit-card" => {
+        "checkout-with-credit-card" => {
             let req: handlers::PayWithVgsCreditCardRequest = serde_json::from_value(args_value).ok()?;
-            match handlers::handle_pay_with_vgs_credit_card(State(farm_state), Json(req)).await {
+            match handlers::handle_checkout_with_credit_card(State(farm_state), Json(req)).await {
                 Ok(axum::Json(r)) => r,
                 Err((_, axum::Json(r))) => r,
             }
         }
-        "confirm-vgs-credit-card-payment" => {
+        "confirm-payment" => {
             let req: handlers::ConfirmVgsCreditCardPaymentRequest = serde_json::from_value(args_value).ok()?;
-            match handlers::handle_confirm_vgs_credit_card_payment(State(farm_state), State(merchant_db), Json(req)).await {
+            match handlers::handle_confirm_payment(State(farm_state), State(merchant_db), Json(req)).await {
                 Ok(axum::Json(r)) => r,
                 Err((_, axum::Json(r))) => r,
             }
@@ -974,8 +974,8 @@ async fn main() -> Result<()> {
         .route("/tools/farm-view-cart", post(handlers::handle_view_cart))
         .route("/tools/farm-checkout", post(handlers::handle_checkout))
         .route("/tools/pay-with-nevermined", post(handlers::handle_pay_with_nevermined))
-        .route("/tools/pay-with-vgs-credit-card", post(handlers::handle_pay_with_vgs_credit_card))
-        .route("/tools/confirm-vgs-credit-card-payment", post(handlers::handle_confirm_vgs_credit_card_payment))
+        .route("/tools/checkout-with-credit-card", post(handlers::handle_checkout_with_credit_card))
+        .route("/tools/confirm-payment", post(handlers::handle_confirm_payment))
         .route("/tools/farm-confirm-payment", post(handlers::handle_farm_confirm_payment))
         .route("/tools/farm-clear-cart", post(handlers::handle_clear_cart))
         .route("/farm/checkout/:order_id", get(handlers::handle_checkout_verify))
@@ -1041,7 +1041,7 @@ async fn main() -> Result<()> {
     println!("  POST /tools/farm-view-cart      — View cart");
     println!("  POST /tools/farm-checkout       — Checkout (x402/nevermined/vgs)");
     println!("  POST /tools/pay-with-nevermined — Nevermined card pay (2-phase proof flow)");
-    println!("  POST /tools/pay-with-vgs-credit-card — VGS card pay via zpi-zkpay");
+    println!("  POST /tools/checkout-with-credit-card — VGS card checkout prep via zpi-zkpay");
     println!("  GET  /farm/checkout/:order_id   — x402 payment verify");
     println!("  GET  /farm/checkout-nevermined/:order_id — Nevermined payment verify");
     println!("  POST /mcp                       — MCP protocol endpoint\n");

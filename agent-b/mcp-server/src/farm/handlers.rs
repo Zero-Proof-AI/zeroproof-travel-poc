@@ -129,14 +129,19 @@ pub struct PayWithVgsCreditCardRequest {
 #[derive(Debug, Deserialize)]
 pub struct ConfirmVgsCreditCardPaymentRequest {
     pub order_id: String,
+    #[serde(default = "default_true")]
     pub payment_confirmed: bool,
     #[serde(default)]
     pub transaction_ref: Option<String>,
     #[serde(default)]
     pub external_id: Option<String>,
     #[serde(default)]
+    pub charge_bundle: Option<String>,
+    #[serde(default)]
     pub zpi_response: Option<serde_json::Value>,
 }
+
+fn default_true() -> bool { true }
 
 #[derive(Debug, Deserialize)]
 pub struct FarmConfirmPaymentRequest {
@@ -1115,12 +1120,12 @@ pub async fn handle_pay_with_nevermined(
     }))))
 }
 
-pub async fn handle_pay_with_vgs_credit_card(
+pub async fn handle_checkout_with_credit_card(
     State(state): State<SharedFarmState>,
     Json(req): Json<PayWithVgsCreditCardRequest>,
 ) -> Result<Json<FarmToolResponse>, (StatusCode, Json<FarmToolResponse>)> {
     tracing::info!(
-        "[FARM-VGS] pay-with-vgs-credit-card called: order_id={}, external_id={}, has_zpi_proof={}, confirm_saved_profile={}",
+        "[FARM-VGS] checkout-with-credit-card called: order_id={}, external_id={}, has_zpi_proof={}, confirm_saved_profile={}",
         req.order_id,
         req.external_id.as_deref().unwrap_or("<auto>"),
         req.zpi_proof.as_ref().map(|p| !p.trim().is_empty()).unwrap_or(false),
@@ -1135,7 +1140,7 @@ pub async fn handle_pay_with_vgs_credit_card(
 
     if zpi_proof.trim().is_empty() {
         tracing::info!(
-            "[FARM-VGS] pay-with-vgs-credit-card returning NEEDS_INTENT_PROOF: order_id={}, external_id={}",
+            "[FARM-VGS] checkout-with-credit-card returning NEEDS_INTENT_PROOF: order_id={}, external_id={}",
             req.order_id,
             external_id
         );
@@ -1145,7 +1150,7 @@ pub async fn handle_pay_with_vgs_credit_card(
             "external_id": external_id,
             "intent_type": "spend",
             "payment_processor": "vgs_card",
-            "instructions": "Call chp_save, then zpi_prove_intent with this external_id and intent_type='spend', then call pay-with-vgs-credit-card again with zpi_proof."
+            "instructions": "Call chp_save, then zpi_prove_intent with this external_id and intent_type='spend', then call checkout-with-credit-card again with zpi_proof."
         }))));
     }
 
@@ -1180,7 +1185,7 @@ pub async fn handle_pay_with_vgs_credit_card(
         ));
     }
 
-    let merchant_id = std::env::var("ZPI_VGS_MERCHANT_ID")
+    let merchant_id = std::env::var("VGS_MERCHANT_ID")
         .unwrap_or_else(|_| "test-merchant-p2".to_string());
 
     let mut body_obj = serde_json::Map::new();
@@ -1236,7 +1241,7 @@ pub async fn handle_pay_with_vgs_credit_card(
     let body = serde_json::Value::Object(body_obj);
 
     tracing::info!(
-        "[FARM-VGS] pay-with-vgs-credit-card returning READY_FOR_ZPI_PAYMENT: order_id={}, external_id={}, merchant_id={}, amount_cents={}",
+        "[FARM-VGS] checkout-with-credit-card returning READY_FOR_ZPI_PAYMENT: order_id={}, external_id={}, merchant_id={}, amount_cents={}",
         req.order_id,
         external_id,
         merchant_id,
@@ -1248,20 +1253,20 @@ pub async fn handle_pay_with_vgs_credit_card(
         "order_id": req.order_id,
         "payment_processor": "vgs_card",
         "external_id": external_id,
-        "zpi_tool": "pay-with-vgs-credit-card",
+        "zpi_tool": "pay-with-credit-card",
         "zpi_arguments": body,
-        "next_tool": "confirm-vgs-credit-card-payment",
-        "instructions": "Now call zpi-zkpay MCP tool pay-with-vgs-credit-card with zpi_arguments exactly. If that succeeds, call confirm-vgs-credit-card-payment with order_id, payment_confirmed=true, and zpi_response from zpi-zkpay.",
+        "next_tool": "confirm-payment",
+        "instructions": "Now call the zpi-zkpay MCP server tool pay-with-credit-card with zpi_arguments exactly. If that succeeds, call confirm-payment with order_id and either charge_bundle or zpi_response from zpi-zkpay.",
     }))))
 }
 
-pub async fn handle_confirm_vgs_credit_card_payment(
+pub async fn handle_confirm_payment(
     State(state): State<SharedFarmState>,
     State(db): State<SharedMerchantDb>,
     Json(req): Json<ConfirmVgsCreditCardPaymentRequest>,
 ) -> Result<Json<FarmToolResponse>, (StatusCode, Json<FarmToolResponse>)> {
     tracing::info!(
-        "[FARM-VGS] confirm-vgs-credit-card-payment called: order_id={}, payment_confirmed={}, external_id={}, transaction_ref={}",
+        "[FARM-VGS] confirm-payment called: order_id={}, payment_confirmed={}, external_id={}, transaction_ref={}",
         req.order_id,
         req.payment_confirmed,
         req.external_id.as_deref().unwrap_or("<none>"),
@@ -1278,21 +1283,22 @@ pub async fn handle_confirm_vgs_credit_card_payment(
         ));
     }
 
-    // Require a zpi_response containing a charge_bundle — this is set by
-    // zpi-zkpay pay-with-vgs-credit-card and proves an actual charge was made.
-    // Without this check an LLM can mark orders as PAID without charging the card.
-    let has_charge_evidence = req.zpi_response.as_ref().and_then(|v| v.get("charge_bundle")).is_some()
+    // Require charge evidence from either the original zpi_response or a direct
+    // top-level charge_bundle payload. This keeps the endpoint compatible with
+    // the tool-call shape actually used by the agent.
+    let has_charge_evidence = req.charge_bundle.as_deref().is_some()
+        || req.zpi_response.as_ref().and_then(|v| v.get("charge_bundle")).is_some()
         || req.zpi_response.as_ref().and_then(|v| v.get("external_id")).is_some();
     if !has_charge_evidence {
         tracing::warn!(
-            "[FARM-VGS] confirm-vgs-credit-card-payment REJECTED (no charge evidence): order_id={}",
+            "[FARM-VGS] confirm-payment REJECTED (no charge evidence): order_id={}",
             req.order_id
         );
         return Err((
             StatusCode::BAD_REQUEST,
             Json(FarmToolResponse::err(
                 400,
-                "zpi_response from pay-with-vgs-credit-card is required (must contain charge_bundle or external_id)".to_string(),
+                "zpi_response from pay-with-credit-card is required (must contain charge_bundle or external_id)".to_string(),
             )),
         ));
     }
@@ -1313,7 +1319,7 @@ pub async fn handle_confirm_vgs_credit_card_payment(
 
     if order.status == OrderStatus::Paid {
         tracing::info!(
-            "[FARM-VGS] confirm-vgs-credit-card-payment idempotent: order already paid, order_id={}",
+            "[FARM-VGS] confirm-payment idempotent: order already paid, order_id={}",
             req.order_id,
         );
         return Ok(Json(FarmToolResponse::ok(json!({
@@ -1335,10 +1341,14 @@ pub async fn handle_confirm_vgs_credit_card_payment(
         // Only mark the order paid if Stripe confirms the PaymentIntent.
         let stripe_pi_id: Option<String> =
             if let Some(bundle) = req
-                .zpi_response
-                .as_ref()
-                .and_then(|v| v.get("charge_bundle"))
-                .and_then(|v| v.as_str())
+                .charge_bundle
+                .as_deref()
+                .or_else(|| {
+                    req.zpi_response
+                        .as_ref()
+                        .and_then(|v| v.get("charge_bundle"))
+                        .and_then(|v| v.as_str())
+                })
             {
                 if let Ok(secret_key) = std::env::var("STRIPE_SECRET_KEY") {
                     match try_decrypt_charge_bundle_jwe(bundle).await {
@@ -1403,6 +1413,8 @@ pub async fn handle_confirm_vgs_credit_card_payment(
                                     payload.get("cavv").and_then(|v| v.as_str());
                                 let eci =
                                     payload.get("eci").and_then(|v| v.as_str());
+                                let ds_trans_id =
+                                    payload.get("dsTransId").and_then(|v| v.as_str());
                                 let bundle_merchant_id = payload
                                     .get("merchant_id")
                                     .and_then(|v| v.as_str())
@@ -1432,6 +1444,7 @@ pub async fn handle_confirm_vgs_credit_card_payment(
                                     bundle_merchant_id,
                                     cavv,
                                     eci,
+                                    ds_trans_id,
                                 )
                                 .await
                                 {
@@ -1515,7 +1528,7 @@ pub async fn handle_confirm_vgs_credit_card_payment(
     }
 
     tracing::info!(
-        "[FARM-VGS] confirm-vgs-credit-card-payment finalized PAID: order_id={}, transaction_ref={}, psp={}",
+        "[FARM-VGS] confirm-payment finalized PAID: order_id={}, transaction_ref={}, psp={}",
         req.order_id,
         tx_ref,
         psp_label,
@@ -2109,7 +2122,7 @@ pub async fn handle_checkout(
                 "amount": format_dollars(order.total_cents),
                 "amount_cents": order.total_cents,
                 "currency": "USD",
-                "instructions": "Call chp_save, then zpi_prove_intent with this external_id and intent_type='spend'. Then call pay-with-vgs-credit-card with order_id + external_id + zpi_proof.",
+                "instructions": "Call chp_save, then zpi_prove_intent with this external_id and intent_type='spend'. Then call checkout-with-credit-card with order_id + external_id + zpi_proof.",
             }))),
         ));
     }
@@ -2524,8 +2537,8 @@ pub fn farm_tool_definitions() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "pay-with-vgs-credit-card",
-            "description": "Prepare VGS checkout after proof validation. This tool does NOT charge directly. It returns zpi-zkpay MCP arguments for pay-with-vgs-credit-card. After zpi-zkpay payment succeeds, call confirm-vgs-credit-card-payment to finalize order status.",
+            "name": "checkout-with-credit-card",
+            "description": "Prepare checkout after proof validation. This merchant tool does NOT charge directly. It returns zpi-zkpay MCP arguments for pay-with-credit-card. After zpi-zkpay payment succeeds, call confirm-payment to finalize order status.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2581,18 +2594,18 @@ pub fn farm_tool_definitions() -> Vec<serde_json::Value> {
             }
         }),
         json!({
-            "name": "confirm-vgs-credit-card-payment",
-            "description": "Finalize farm order after zpi-zkpay pay-with-vgs-credit-card succeeds. Marks the order as PAID and stores transaction reference.",
+            "name": "confirm-payment",
+            "description": "Finalize farm order after successful payment. Supports direct charge_bundle or zpi_response payloads and marks order as PAID.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "order_id": {
                         "type": "string",
-                        "description": "Order ID returned from farm-checkout with payment_method='vgs_card'."
+                        "description": "Order ID returned from farm-checkout."
                     },
                     "payment_confirmed": {
                         "type": "boolean",
-                        "description": "Must be true only after zpi-zkpay payment succeeded."
+                        "description": "Defaults to true when omitted. Set false only to explicitly abort confirmation."
                     },
                     "transaction_ref": {
                         "type": "string",
@@ -2602,12 +2615,16 @@ pub fn farm_tool_definitions() -> Vec<serde_json::Value> {
                         "type": "string",
                         "description": "Optional external ID used for proof/idempotency."
                     },
+                    "charge_bundle": {
+                        "type": "string",
+                        "description": "Optional top-level JWE charge bundle from zpi-zkpay."
+                    },
                     "zpi_response": {
                         "type": "object",
-                        "description": "Optional zpi-zkpay pay-with-vgs-credit-card response payload."
+                        "description": "Optional full zpi-zkpay pay-with-credit-card response payload."
                     }
                 },
-                "required": ["order_id", "payment_confirmed"]
+                "required": ["order_id"]
             }
         }),
         json!({
@@ -2648,7 +2665,7 @@ pub fn farm_tool_definitions() -> Vec<serde_json::Value> {
                 "properties": {
                     "charge_bundle": {
                         "type": "string",
-                        "description": "JWE compact serialization returned by zpi-zkpay pay-with-vgs-credit-card."
+                        "description": "JWE compact serialization returned by zpi-zkpay pay-with-credit-card."
                     },
                     "external_id": {
                         "type": "string",
@@ -2706,11 +2723,11 @@ FARM MERCHANT INSTRUCTIONS:
 9. To purchase with VGS card flow, call farm-checkout with payment_method='vgs_card'.
     It returns NEEDS_INTENT_PROOF immediately.
     Run chp_save + zpi_prove_intent (intent_type='spend'), then call
-    pay-with-vgs-credit-card with order_id + external_id + zpi_proof.
-10. If pay-with-vgs-credit-card returns READY_FOR_ZPI_PAYMENT, call zpi-zkpay MCP tool
-    pay-with-vgs-credit-card using zpi_arguments exactly as returned.
-11. After zpi-zkpay payment succeeds, call confirm-vgs-credit-card-payment with
-    order_id + payment_confirmed=true (+ zpi_response when available).
+    checkout-with-credit-card with order_id + external_id + zpi_proof.
+10. If checkout-with-credit-card returns READY_FOR_ZPI_PAYMENT, call zpi-zkpay MCP tool
+    pay-with-credit-card using zpi_arguments exactly as returned.
+11. After zpi-zkpay payment succeeds, call confirm-payment with
+    order_id (+ payment_confirmed=true when explicit) and either charge_bundle or zpi_response.
 12. If pay-with-nevermined returns PROOF_MISMATCH, STOP and ask the user to confirm intent
     before generating a new proof.
 13. Available categories: dairy, meat, poultry, produce.

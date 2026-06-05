@@ -607,7 +607,7 @@ fn verify_stripe_signature(
 
 /// Charge a VGS network token (DPAN) via Stripe PaymentIntents API.
 ///
-/// Called by `confirm-vgs-credit-card-payment` after the JWE charge_bundle
+/// Called by `confirm-payment` after the JWE charge_bundle
 /// is decrypted. The DPAN and one-time cryptogram from VGS CMP are forwarded
 /// to Stripe as a confirmed PaymentIntent.
 ///
@@ -625,6 +625,7 @@ pub async fn charge_with_network_token(
     merchant_id: &str,
     cavv: Option<&str>,     // 3DS CAVV from PAAY (None when bypassed in test mode)
     eci: Option<&str>,      // 3DS ECI from PAAY
+    ds_trans_id: Option<&str>, // 3DS Directory Server Transaction ID from PAAY (RFC 4122 lowercase UUID)
 ) -> Result<String, String> {
     let currency = numeric_to_alpha_currency(currency_numeric);
 
@@ -731,7 +732,6 @@ pub async fn charge_with_network_token(
 
     // Include 3DS auth data only when PAAY performed real 3DS authentication.
     // When PAAY is bypassed (sandbox / DPAN-only flow), omit three_d_secure entirely.
-    // NOTE: in production with PAAY active, also pass the real dsTransID.
     if let Some(cavv_val) = cavv {
         pi_params.push((
             "payment_method_options[card][three_d_secure][cryptogram]".to_string(),
@@ -747,12 +747,21 @@ pub async fn charge_with_network_token(
                 .to_string(),
             eci_value.to_string(),
         ));
-        // transaction_id (dsTransID) required by Stripe; use external_id as placeholder
-        // until the real PAAY dsTransID is threaded through the charge bundle.
-        pi_params.push((
-            "payment_method_options[card][three_d_secure][transaction_id]".to_string(),
-            external_id.to_string(),
-        ));
+        // Stripe requires transaction_id to be an RFC 4122 lowercase UUID for 3DS2.
+        // Use the real PAAY dsTransID when present; otherwise omit (better than sending
+        // a non-UUID placeholder that Stripe will reject with HTTP 400).
+        if let Some(dst) = ds_trans_id.filter(|s| !s.is_empty()) {
+            pi_params.push((
+                "payment_method_options[card][three_d_secure][transaction_id]".to_string(),
+                dst.to_lowercase(),
+            ));
+        } else {
+            tracing::warn!(
+                "[STRIPE] 3DS transaction_id (dsTransID) missing from charge_bundle for external_id={} \
+                 — omitting field (Stripe may downgrade auth)",
+                external_id,
+            );
+        }
     }
 
     tracing::info!(
