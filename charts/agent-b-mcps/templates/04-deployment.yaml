@@ -186,6 +186,16 @@ spec:
                 configMapKeyRef:
                   name: agent-b-mcps-config
                   key: MERCHANT_PSP_CONFIG_JSON
+            - name: VGS_MERCHANT_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: agent-b-mcps-config
+                  key: VGS_MERCHANT_ID
+            - name: NEVERMINED_STOP_AFTER_VERIFY
+              valueFrom:
+                configMapKeyRef:
+                  name: agent-b-mcps-config
+                  key: NEVERMINED_STOP_AFTER_VERIFY
             - name: STRIPE_DPAN_MOCK_SUCCESS
               valueFrom:
                 configMapKeyRef:

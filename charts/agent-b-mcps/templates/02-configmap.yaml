@@ -26,12 +26,14 @@ data:
   NEVERMINED_PAY_TO: agent-b-farm
   NEVERMINED_USE_TOKEN_EXCHANGE: "true"
   NEVERMINED_VERIFY_LEGACY_RETRY: "false"
-  NEVERMINED_MERCHANT_ALLOWLIST: "localhost,127.0.0.1,dev.agentb.zeroproofai.com"
+  NEVERMINED_MERCHANT_ALLOWLIST: "localhost,127.0.0.1,dev.agentb.zeroproofai.com,merchant.zeroproofai.com"
+  NEVERMINED_STOP_AFTER_VERIFY: "false"
   SERVER_BASE_URL: https://dev.agentb.zeroproofai.com
   NEVERMINED_DANGER_ACCEPT_INVALID_CERTS: "false"
   NEVERMINED_HTTP_TRACE: "true"
   # farm-confirm-payment: PSP forwarding
   ZPI_ZKPAY_BASE_URL: http://zpi-zkpay.mordor.svc.cluster.local:8080
   MERCHANT_PSP_CONFIG_JSON: ""
+  VGS_MERCHANT_ID: "agent-b-farm"
   # Set to "false" when switching to live Stripe credentials + VGS outbound routing.
   STRIPE_DPAN_MOCK_SUCCESS: "true"
