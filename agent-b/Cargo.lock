@@ -82,6 +82,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid 1.19.0",
+ "zk-agentic-sdk",
 ]
 
 [[package]]
@@ -8949,6 +8950,16 @@ dependencies = [
  "sha1",
  "time",
  "zstd",
+]
+
+[[package]]
+name = "zk-agentic-sdk"
+version = "0.1.0"
+dependencies = [
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.17",
 ]
 
 [[package]]

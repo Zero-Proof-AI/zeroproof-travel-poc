@@ -1,4 +1,5 @@
 use rusqlite::{params, Connection};
+use chrono::{Duration, Utc};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -73,7 +74,13 @@ impl MerchantDb {
     }
 
     /// Save the merchant wallet address and email after enrollment.
-    pub fn save_enrollment(&self, email: &str, wallet_address: &str) -> anyhow::Result<()> {
+    pub fn save_enrollment(
+        &self,
+        email: &str,
+        wallet_address: &str,
+        s1k: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let now = Utc::now().to_rfc3339();
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT OR REPLACE INTO merchant_config (key, value) VALUES ('email', ?1)",
@@ -83,6 +90,80 @@ impl MerchantDb {
             "INSERT OR REPLACE INTO merchant_config (key, value) VALUES ('wallet_address', ?1)",
             params![wallet_address],
         )?;
+        if let Some(v) = s1k {
+            conn.execute(
+                "INSERT OR REPLACE INTO merchant_config (key, value) VALUES ('s1k', ?1)",
+                params![v],
+            )?;
+            conn.execute(
+                "INSERT OR REPLACE INTO merchant_config (key, value) VALUES ('s1k_issued_at', ?1)",
+                params![&now],
+            )?;
+            conn.execute(
+                "INSERT OR REPLACE INTO merchant_config (key, value) VALUES ('s1k_expires_at', ?1)",
+                params![(Utc::now() + Duration::days(30)).to_rfc3339()],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Get the stored merchant s1k, if any.
+    pub fn get_s1k(&self) -> Option<String> {
+        let conn = self.conn.lock().unwrap();
+        let s1k = conn.query_row(
+            "SELECT value FROM merchant_config WHERE key = 's1k'",
+            [],
+            |row| row.get(0),
+        )
+        .ok()?;
+
+        let expires_at = conn
+            .query_row(
+                "SELECT value FROM merchant_config WHERE key = 's1k_expires_at'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .ok();
+
+        if let Some(expires_at) = expires_at {
+            if let Ok(expiry) = chrono::DateTime::parse_from_rfc3339(&expires_at) {
+                if expiry < Utc::now() {
+                    let _ = conn.execute(
+                        "DELETE FROM merchant_config WHERE key IN ('s1k', 's1k_issued_at', 's1k_expires_at')",
+                        [],
+                    );
+                    return None;
+                }
+            }
+        }
+
+        Some(s1k)
+    }
+
+    /// Save or update the merchant s1k with optional expiry.
+    pub fn save_s1k(&self, s1k: &str, expires_at: Option<&str>) -> anyhow::Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO merchant_config (key, value) VALUES ('s1k', ?1)",
+            params![s1k],
+        )?;
+        conn.execute(
+            "INSERT OR REPLACE INTO merchant_config (key, value) VALUES ('s1k_issued_at', ?1)",
+            params![&now],
+        )?;
+        if let Some(exp) = expires_at {
+            conn.execute(
+                "INSERT OR REPLACE INTO merchant_config (key, value) VALUES ('s1k_expires_at', ?1)",
+                params![exp],
+            )?;
+        } else {
+            // Default to 30 days if no expiry specified
+            conn.execute(
+                "INSERT OR REPLACE INTO merchant_config (key, value) VALUES ('s1k_expires_at', ?1)",
+                params![(Utc::now() + Duration::days(30)).to_rfc3339()],
+            )?;
+        }
         Ok(())
     }
 

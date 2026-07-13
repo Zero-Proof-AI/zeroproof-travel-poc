@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// Client for zpi-zkpay merchant enrollment endpoints.
 pub struct ZkpayClient {
@@ -34,11 +35,28 @@ pub struct MerchantEnrollResponse {
     pub email: String,
     #[serde(rename = "chainId")]
     pub chain_id: u64,
+    pub s1k: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct ErrorResponse {
     error: String,
+}
+
+#[derive(Serialize)]
+struct MerchantQuoteSignRequest {
+    email: String,
+    quote: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    s1k: Option<String>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct MerchantQuoteSignResponse {
+    #[serde(rename = "walletAddress")]
+    pub wallet_address: String,
+    pub email: String,
+    pub signature: Value,
 }
 
 impl ZkpayClient {
@@ -104,6 +122,38 @@ impl ZkpayClient {
         resp.json::<MerchantEnrollResponse>()
             .await
             .map_err(|e| format!("Failed to parse enrollment response: {}", e))
+    }
+
+    /// Request a Web3Auth-backed merchant quote signature.
+    pub async fn sign_quote(
+        &self,
+        email: &str,
+        quote: &Value,
+        s1k: Option<&str>,
+    ) -> Result<MerchantQuoteSignResponse, String> {
+        let resp = self
+            .client
+            .post(format!("{}/petty-cash/sign-merchant-quote", self.base_url))
+            .json(&MerchantQuoteSignRequest {
+                email: email.into(),
+                quote: quote.clone(),
+                s1k: s1k.map(|v| v.to_string()),
+            })
+            .send()
+            .await
+            .map_err(|e| format!("Failed to reach zpi-zkpay: {}", e))?;
+
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            if let Ok(err) = serde_json::from_str::<ErrorResponse>(&body) {
+                return Err(err.error);
+            }
+            return Err(format!("Quote signing failed: {}", body));
+        }
+
+        resp.json::<MerchantQuoteSignResponse>()
+            .await
+            .map_err(|e| format!("Failed to parse quote-sign response: {}", e))
     }
 }
 

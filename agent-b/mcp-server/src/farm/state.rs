@@ -15,6 +15,7 @@ pub struct PendingNeverminedPayment {
 pub struct FarmState {
     pub carts: HashMap<String, Cart>,
     pub orders: HashMap<String, Order>,
+    pub checkout_refs: HashMap<String, String>,
     pub pending_nevermined: HashMap<String, PendingNeverminedPayment>,
     /// When true, checkout inflates the total by a multiplier for unhappy-path testing.
     pub tamper_mode: bool,
@@ -27,6 +28,7 @@ impl FarmState {
         Self {
             carts: HashMap::new(),
             orders: HashMap::new(),
+            checkout_refs: HashMap::new(),
             pending_nevermined: HashMap::new(),
             tamper_mode: false,
             tamper_multiplier: 3.0,

@@ -6,6 +6,7 @@ use base64::Engine as _;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::time::{Duration, Instant};
 
 use farm_core::cart::add_to_cart;
 use farm_core::catalog::{find_product, list_products};
@@ -13,8 +14,146 @@ use farm_core::types::{Cart, Order, OrderStatus, PaymentMethod};
 
 use super::db::SharedMerchantDb;
 use super::enrollment::ZkpayClient;
+use super::sdk_storage::AgentBSdkStorage;
+use zk_agentic_sdk::MerchantSdk;
 use super::state::SharedFarmState;
 use super::x402::{self, X402Config};
+
+// ── Quote signing ─────────────────────────────────────────────────
+
+/// Build a quote envelope for a cart-level checkout_prepare response.
+/// Signs the quote payload with the merchant's Web3Auth-backed MPC wallet.
+async fn build_checkout_quote_envelope(
+    db: &SharedMerchantDb,
+    external_id: &str,
+    amount: f64,
+    currency: &str,
+    merchant_product_id: Option<&str>,
+    skip_signing: bool,
+) -> serde_json::Value {
+    let now = chrono::Utc::now();
+    let issued_at = now.to_rfc3339();
+    let expires_at = (now + chrono::Duration::minutes(5)).to_rfc3339();
+
+    let short_ref = external_id.get(..20.min(external_id.len())).unwrap_or(external_id);
+    let quote_id = format!("q_{}", short_ref.replace(['-', '_'], ""));
+
+    let merchant_id = std::env::var("AGENT_B_MERCHANT_ID")
+        .unwrap_or_else(|_| "agent-b".to_string());
+
+    // Canonical payload — key order must match canonicalize_payload (alphabetical).
+    // Fields mirror the quote envelope shape expected by zk-ordering's verifyQuoteSignature.
+    let mut payload_map = serde_json::Map::new();
+    payload_map.insert("currency".into(), json!(currency));
+    payload_map.insert("expires_at".into(), json!(expires_at));
+    payload_map.insert("issued_at".into(), json!(issued_at));
+    payload_map.insert("max_quantity".into(), serde_json::Value::Null);
+    payload_map.insert("merchant_id".into(), json!(merchant_id));
+    payload_map.insert("merchant_product_id".into(), json!(merchant_product_id));
+    payload_map.insert("min_quantity".into(), json!(1u64));
+    payload_map.insert("quote_id".into(), json!(quote_id));
+    payload_map.insert("unit_price".into(), json!(amount));
+    let payload = serde_json::Value::Object(payload_map);
+
+    let quote_sign_timeout_ms = std::env::var("AGENT_B_QUOTE_SIGN_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v >= 100)
+        .unwrap_or(250);
+
+    let signature = if skip_signing {
+        tracing::warn!(
+            external_id = %external_id,
+            "Skipping quote signing due to prior signing failure in this request"
+        );
+        serde_json::Value::Null
+    } else {
+        match db.get_email() {
+        Some(email) if !email.trim().is_empty() => {
+            let db = db.clone();
+            let payload = payload.clone();
+            let email = email.trim().to_string();
+            let sign_started_at = Instant::now();
+
+            tracing::info!(
+                external_id = %external_id,
+                timeout_ms = quote_sign_timeout_ms,
+                "Starting quote signing"
+            );
+
+            let sign_task = tokio::task::spawn_blocking(move || {
+                let storage = AgentBSdkStorage::new(db);
+                let merchant_id = std::env::var("AGENT_B_MERCHANT_ID")
+                    .unwrap_or_else(|_| "agent-b".to_string());
+
+                let sdk = MerchantSdk::new(storage, &merchant_id);
+
+                sdk.sign_quote(zk_agentic_sdk::SignQuoteInput {
+                    email,
+                    quote: payload,
+                })
+            });
+
+            match tokio::time::timeout(Duration::from_millis(quote_sign_timeout_ms), sign_task).await {
+                Ok(Ok(Ok(result))) => {
+                    let elapsed_ms = sign_started_at.elapsed().as_millis() as u64;
+                    tracing::info!(
+                        external_id = %external_id,
+                        elapsed_ms,
+                        "Quote signing completed"
+                    );
+                    result.signature
+                }
+                Ok(Ok(Err(err))) => {
+                    let elapsed_ms = sign_started_at.elapsed().as_millis() as u64;
+                    tracing::warn!("quote signing disabled: {:?}", err);
+                    tracing::warn!(
+                        external_id = %external_id,
+                        elapsed_ms,
+                        "Quote signing failed"
+                    );
+                    serde_json::Value::Null
+                }
+                Ok(Err(err)) => {
+                    let elapsed_ms = sign_started_at.elapsed().as_millis() as u64;
+                    tracing::warn!("quote signing disabled: spawn_blocking failed: {:?}", err);
+                    tracing::warn!(
+                        external_id = %external_id,
+                        elapsed_ms,
+                        "Quote signing spawn task failed"
+                    );
+                    serde_json::Value::Null
+                }
+                Err(_elapsed) => {
+                    tracing::warn!(
+                        external_id = %external_id,
+                        timeout_ms = quote_sign_timeout_ms,
+                        "Quote signing timed out; returning unsigned quote"
+                    );
+                    serde_json::Value::Null
+                }
+            }
+        }
+        _ => {
+            tracing::warn!("quote signing disabled: merchant email missing from local DB");
+            serde_json::Value::Null
+        }
+    }
+    };
+
+    json!({
+        "quote_id": quote_id,
+        "merchant_id": merchant_id,
+        "merchant_product_id": merchant_product_id,
+        "unit_price": amount,
+        "currency": currency,
+        "min_quantity": 1,
+        "max_quantity": null,
+        "issued_at": issued_at,
+        "expires_at": expires_at,
+        "signature": signature,
+    })
+}
 
 // ── Request / Response types ─────────────────────────────────────
 
@@ -26,6 +165,28 @@ pub struct ListProductsRequest {
 #[derive(Debug, Deserialize)]
 pub struct GetProductRequest {
     pub product_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DiscoveryListProductsRequest {
+    #[serde(default)]
+    pub query: Option<String>,
+    #[serde(default)]
+    pub department: Option<String>,
+    #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub product_type: Option<String>,
+    #[serde(default)]
+    pub features: Vec<String>,
+    #[serde(default)]
+    pub price_min: Option<f64>,
+    #[serde(default)]
+    pub price_max: Option<f64>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub request_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -59,6 +220,50 @@ fn default_payment_method() -> String {
 #[derive(Debug, Deserialize)]
 pub struct ClearCartRequest {
     pub session_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ContractCheckoutPrepareRequest {
+    pub session_id: String,
+    #[serde(default = "default_contract_payment_method")]
+    pub payment_method: String,
+    #[serde(default)]
+    pub request_id: Option<String>,
+}
+
+fn default_contract_payment_method() -> String {
+    "vgs_card".into()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ContractCheckoutFinalizeRequest {
+    pub external_id: String,
+    #[serde(default)]
+    pub merchant_checkout_ref: Option<String>,
+    #[serde(default)]
+    pub request_id: Option<String>,
+    #[serde(default)]
+    pub payment_context: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ContractCheckoutCancelRequest {
+    #[serde(default)]
+    pub external_id: Option<String>,
+    #[serde(default)]
+    pub merchant_checkout_ref: Option<String>,
+    #[serde(default)]
+    pub request_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ContractCheckoutStatusRequest {
+    #[serde(default)]
+    pub external_id: Option<String>,
+    #[serde(default)]
+    pub merchant_checkout_ref: Option<String>,
+    #[serde(default)]
+    pub request_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -207,6 +412,26 @@ impl FarmToolResponse {
 
 fn format_dollars(cents: u64) -> String {
     format!("${:.2}", cents as f64 / 100.0)
+}
+
+fn parse_query_tokens(raw_query: &Option<String>) -> Vec<String> {
+    raw_query
+        .as_deref()
+        .unwrap_or("")
+        .split_whitespace()
+        .map(|t| t.trim().to_lowercase())
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
+fn product_text_blob(product_id: &str, product_name: &str, category_slug: &str, features: &[String]) -> String {
+    let mut pieces = vec![
+        product_id.to_lowercase(),
+        product_name.to_lowercase(),
+        category_slug.to_lowercase(),
+    ];
+    pieces.extend(features.iter().map(|f| f.to_lowercase()));
+    pieces.join(" ")
 }
 
 fn amount_to_cents(amount: f64) -> Result<u64, String> {
@@ -1960,6 +2185,338 @@ pub async fn handle_clear_cart(
     })))
 }
 
+fn resolve_order_id_by_ref(
+    state: &super::state::FarmState,
+    external_id: Option<&str>,
+    merchant_checkout_ref: Option<&str>,
+) -> Option<String> {
+    if let Some(ref_id) = merchant_checkout_ref {
+        if state.orders.contains_key(ref_id) {
+            return Some(ref_id.to_string());
+        }
+    }
+
+    if let Some(ext) = external_id {
+        if let Some(order_id) = state.checkout_refs.get(ext) {
+            return Some(order_id.clone());
+        }
+    }
+
+    None
+}
+
+fn contract_status_from_order_status(status: &OrderStatus) -> &'static str {
+    match status {
+        OrderStatus::PendingPayment => "ready",
+        OrderStatus::Paid => "finalized",
+        OrderStatus::Cancelled => "cancelled",
+        OrderStatus::Shipped => "finalized",
+    }
+}
+
+pub async fn handle_contract_checkout_prepare(
+    State(state): State<SharedFarmState>,
+    State(db): State<SharedMerchantDb>,
+    Json(req): Json<ContractCheckoutPrepareRequest>,
+) -> Result<Json<FarmToolResponse>, (StatusCode, Json<FarmToolResponse>)> {
+    let payment_method = req.payment_method.trim().to_lowercase();
+    let normalized_method = if payment_method.is_empty() {
+        "vgs_card".to_string()
+    } else {
+        payment_method
+    };
+
+    let checkout_req = CheckoutRequest {
+        session_id: req.session_id.clone(),
+        payment_method: normalized_method,
+    };
+
+    let checkout_result = handle_checkout(State(state.clone()), State(db.clone()), Json(checkout_req)).await;
+    let (_, checkout_resp) = match checkout_result {
+        Ok(ok) => ok,
+        Err(err) => err,
+    };
+
+    if !checkout_resp.success {
+        let code = checkout_resp.status_code.unwrap_or(502);
+        return Err((
+            StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_GATEWAY),
+            Json(FarmToolResponse::err(
+                code,
+                checkout_resp
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "checkout_prepare failed".to_string()),
+            )),
+        ));
+    }
+
+    let data = checkout_resp.data.clone().unwrap_or_else(|| json!({}));
+    let external_id = data
+        .get("external_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let order_id = data
+        .get("order_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    if external_id.is_empty() || order_id.is_empty() {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            Json(FarmToolResponse::err(
+                502,
+                "merchant checkout did not return external_id/order_id for contract prepare"
+                    .to_string(),
+            )),
+        ));
+    }
+
+    {
+        let mut s = state.write().await;
+        s.checkout_refs.insert(external_id.clone(), order_id.clone());
+    }
+
+    let amount = data
+        .get("amount")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.trim_start_matches('$').parse::<f64>().ok())
+        .or_else(|| data.get("amount_cents").and_then(|v| v.as_u64()).map(|c| c as f64 / 100.0))
+        .unwrap_or(0.0);
+
+    let currency = data
+        .get("currency")
+        .and_then(|v| v.as_str())
+        .unwrap_or("USD");
+
+    let quote = build_checkout_quote_envelope(&db, &external_id, amount, currency, None, false).await;
+
+    Ok(Json(FarmToolResponse::ok(json!({
+        "status": "ready",
+        "external_id": external_id,
+        "merchant_checkout_ref": order_id,
+        "amount": amount,
+        "currency": currency,
+        "quote": quote,
+        "next_steps": ["prove_intent", "checkout_finalize"],
+        "request_id": req.request_id,
+        "errors": [],
+    }))))
+}
+
+pub async fn handle_contract_checkout_finalize(
+    State(state): State<SharedFarmState>,
+    State(db): State<SharedMerchantDb>,
+    Json(req): Json<ContractCheckoutFinalizeRequest>,
+) -> Result<Json<FarmToolResponse>, (StatusCode, Json<FarmToolResponse>)> {
+    if req.external_id.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(FarmToolResponse::err(400, "external_id is required".to_string())),
+        ));
+    }
+
+    let order_id = {
+        let s = state.read().await;
+        resolve_order_id_by_ref(&s, Some(req.external_id.as_str()), req.merchant_checkout_ref.as_deref())
+    }
+    .ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(FarmToolResponse::err(
+                404,
+                format!("No checkout found for external_id='{}'", req.external_id),
+            )),
+        )
+    })?;
+
+    let existing_order = {
+        let s = state.read().await;
+        s.orders.get(&order_id).cloned()
+    }
+    .ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(FarmToolResponse::err(404, format!("Order '{}' not found", order_id))),
+        )
+    })?;
+
+    if existing_order.status == OrderStatus::Paid {
+        return Ok(Json(FarmToolResponse::ok(json!({
+            "status": "finalized",
+            "order_id": order_id,
+            "external_id": req.external_id,
+            "receipt": {
+                "external_id": req.external_id,
+                "order_id": order_id,
+            },
+            "request_id": req.request_id,
+            "errors": [],
+        }))));
+    }
+
+    let payment_context = req.payment_context.clone().unwrap_or_else(|| json!({}));
+    let has_evidence = payment_context.get("charge_bundle").is_some()
+        || payment_context.get("zpi_response").is_some()
+        || payment_context.get("transaction_ref").is_some();
+
+    if !has_evidence {
+        return Ok(Json(FarmToolResponse::ok(json!({
+            "status": "requires_input",
+            "order_id": order_id,
+            "external_id": req.external_id,
+            "next_steps": ["submit_payment_context", "retry_checkout_finalize"],
+            "errors": [
+                {
+                    "code": "payment_context_required",
+                    "message": "payment_context with charge_bundle, zpi_response, or transaction_ref is required to finalize"
+                }
+            ]
+        }))));
+    }
+
+    let confirm_req = ConfirmVgsCreditCardPaymentRequest {
+        order_id: order_id.clone(),
+        payment_confirmed: true,
+        transaction_ref: payment_context
+            .get("transaction_ref")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        external_id: Some(req.external_id.clone()),
+        charge_bundle: payment_context
+            .get("charge_bundle")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        zpi_response: payment_context.get("zpi_response").cloned(),
+    };
+
+    let confirm = handle_confirm_payment(State(state), State(db), Json(confirm_req)).await;
+    let payload = match confirm {
+        Ok(axum::Json(r)) => r,
+        Err((status, axum::Json(r))) => {
+            if status == StatusCode::PAYMENT_REQUIRED {
+                return Ok(Json(FarmToolResponse::ok(json!({
+                    "status": "failed",
+                    "order_id": order_id,
+                    "external_id": req.external_id,
+                    "request_id": req.request_id,
+                    "errors": [{
+                        "code": "payment_failed",
+                        "message": r.error.unwrap_or_else(|| "payment not settled".to_string())
+                    }]
+                }))));
+            }
+            return Err((status, Json(r)));
+        }
+    };
+
+    let tx = payload
+        .data
+        .as_ref()
+        .and_then(|d| d.get("transaction_ref"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    Ok(Json(FarmToolResponse::ok(json!({
+        "status": "finalized",
+        "order_id": order_id,
+        "external_id": req.external_id,
+        "receipt": {
+            "external_id": req.external_id,
+            "order_id": order_id,
+            "transaction_ref": tx,
+        },
+        "request_id": req.request_id,
+        "errors": [],
+    }))))
+}
+
+pub async fn handle_contract_checkout_cancel(
+    State(state): State<SharedFarmState>,
+    Json(req): Json<ContractCheckoutCancelRequest>,
+) -> Result<Json<FarmToolResponse>, (StatusCode, Json<FarmToolResponse>)> {
+    let order_id = {
+        let s = state.read().await;
+        resolve_order_id_by_ref(&s, req.external_id.as_deref(), req.merchant_checkout_ref.as_deref())
+    }
+    .ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(FarmToolResponse::err(
+                404,
+                "No checkout found for provided external_id/merchant_checkout_ref".to_string(),
+            )),
+        )
+    })?;
+
+    {
+        let mut s = state.write().await;
+        if let Some(order) = s.orders.get_mut(&order_id) {
+            if order.status != OrderStatus::Paid {
+                order.status = OrderStatus::Cancelled;
+            }
+        }
+        if let Some(ext) = req.external_id.as_ref() {
+            s.checkout_refs.remove(ext);
+        }
+    }
+
+    Ok(Json(FarmToolResponse::ok(json!({
+        "status": "cancelled",
+        "order_id": order_id,
+        "external_id": req.external_id,
+        "request_id": req.request_id,
+        "errors": [],
+    }))))
+}
+
+pub async fn handle_contract_checkout_status(
+    State(state): State<SharedFarmState>,
+    Json(req): Json<ContractCheckoutStatusRequest>,
+) -> Result<Json<FarmToolResponse>, (StatusCode, Json<FarmToolResponse>)> {
+    let order_id = {
+        let s = state.read().await;
+        resolve_order_id_by_ref(&s, req.external_id.as_deref(), req.merchant_checkout_ref.as_deref())
+    }
+    .ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(FarmToolResponse::err(
+                404,
+                "No checkout found for provided external_id/merchant_checkout_ref".to_string(),
+            )),
+        )
+    })?;
+
+    let (status, amount, currency) = {
+        let s = state.read().await;
+        let order = s.orders.get(&order_id).ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(FarmToolResponse::err(404, format!("Order '{}' not found", order_id))),
+            )
+        })?;
+        (
+            contract_status_from_order_status(&order.status).to_string(),
+            order.total_cents as f64 / 100.0,
+            "USD".to_string(),
+        )
+    };
+
+    Ok(Json(FarmToolResponse::ok(json!({
+        "status": status,
+        "order_id": order_id,
+        "external_id": req.external_id,
+        "amount": amount,
+        "currency": currency,
+        "request_id": req.request_id,
+        "errors": [],
+    }))))
+}
+
 pub async fn handle_tamper_mode(
     State(state): State<SharedFarmState>,
     Json(req): Json<TamperModeRequest>,
@@ -2451,6 +3008,28 @@ fn cart_to_json(cart: &Cart) -> serde_json::Value {
 pub fn farm_tool_definitions() -> Vec<serde_json::Value> {
     vec![
         json!({
+            "name": "discovery-list-products",
+            "description": "Discovery-facing product listing with signed quote payload per product.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Free-text search query" },
+                    "department": { "type": "string", "description": "Department slug filter" },
+                    "category": { "type": "string", "description": "Category slug filter" },
+                    "product_type": { "type": "string", "description": "Product type slug filter" },
+                    "features": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Required product features"
+                    },
+                    "price_min": { "type": "number", "description": "Minimum unit price in USD" },
+                    "price_max": { "type": "number", "description": "Maximum unit price in USD" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 100 }
+                },
+                "required": ["department", "category", "product_type"]
+            }
+        }),
+        json!({
             "name": "farm-list-products",
             "description": "List available farm products. Optionally filter by category: dairy, meat, poultry, produce.",
             "inputSchema": {
@@ -2701,6 +3280,99 @@ pub fn farm_tool_definitions() -> Vec<serde_json::Value> {
                 "required": ["session_id"]
             }
         }),
+        json!({
+            "name": "checkout_prepare",
+            "description": "Merchant checkout contract prepare step for zk-ordering. Creates an order and returns merchant-owned external_id and merchant_checkout_ref.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Merchant cart/session ID."
+                    },
+                    "payment_method": {
+                        "type": "string",
+                        "enum": ["vgs_card", "nevermined_card", "x402_crypto"],
+                        "description": "Payment method used for prepare. Default is vgs_card."
+                    },
+                    "request_id": {
+                        "type": "string",
+                        "description": "Optional caller correlation ID."
+                    }
+                },
+                "required": ["session_id"]
+            }
+        }),
+        json!({
+            "name": "checkout_finalize",
+            "description": "Merchant checkout contract finalize step for zk-ordering. Finalizes payment using external_id and payment_context.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "external_id": {
+                        "type": "string",
+                        "description": "Merchant-owned external ID returned by checkout_prepare."
+                    },
+                    "merchant_checkout_ref": {
+                        "type": "string",
+                        "description": "Optional merchant checkout reference (order ID)."
+                    },
+                    "request_id": {
+                        "type": "string",
+                        "description": "Optional caller correlation ID."
+                    },
+                    "payment_context": {
+                        "type": "object",
+                        "description": "Payment evidence such as charge_bundle, zpi_response, or transaction_ref."
+                    }
+                },
+                "required": ["external_id"]
+            }
+        }),
+        json!({
+            "name": "checkout_cancel",
+            "description": "Merchant checkout contract cancel step for zk-ordering.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "external_id": {
+                        "type": "string",
+                        "description": "Merchant-owned external ID."
+                    },
+                    "merchant_checkout_ref": {
+                        "type": "string",
+                        "description": "Optional merchant checkout reference (order ID)."
+                    },
+                    "request_id": {
+                        "type": "string",
+                        "description": "Optional caller correlation ID."
+                    }
+                },
+                "required": []
+            }
+        }),
+        json!({
+            "name": "checkout_status",
+            "description": "Merchant checkout contract status step for zk-ordering.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "external_id": {
+                        "type": "string",
+                        "description": "Merchant-owned external ID."
+                    },
+                    "merchant_checkout_ref": {
+                        "type": "string",
+                        "description": "Optional merchant checkout reference (order ID)."
+                    },
+                    "request_id": {
+                        "type": "string",
+                        "description": "Optional caller correlation ID."
+                    }
+                },
+                "required": []
+            }
+        }),
     ]
 }
 
@@ -2787,44 +3459,83 @@ pub async fn handle_verify_otp(
     State(db): State<SharedMerchantDb>,
     Json(body): Json<VerifyOtpRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let client = ZkpayClient::new();
-    let chain_id = body.chain_id.unwrap_or(84532); // Default to Base Sepolia
+    handle_merchant_enrollment(db, body.email, body.otp, body.chain_id, false).await
+}
 
-    match client.merchant_enroll(&body.email, &body.otp, chain_id).await {
-        Ok(result) => {
-            // Persist to SQLite
-            if let Err(e) = db.save_enrollment(&result.email, &result.wallet_address) {
-                tracing::error!("Failed to save enrollment: {}", e);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({ "error": "Enrollment succeeded but failed to persist" })),
-                );
+/// POST /api/merchant/re-enroll — verify OTP and recover merchant wallet
+pub async fn handle_reenroll_merchant(
+    State(db): State<SharedMerchantDb>,
+    Json(body): Json<VerifyOtpRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    handle_merchant_enrollment(db, body.email, body.otp, body.chain_id, true).await
+}
+
+async fn handle_merchant_enrollment(
+    db: SharedMerchantDb,
+    email: String,
+    otp: String,
+    chain_id: Option<u64>,
+    reenroll: bool,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let chain_id = chain_id.unwrap_or(84532); // Default to Base Sepolia
+
+    let db_for_task = db.clone();
+    let email_for_task = email.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        // Create SDK instance with storage adapter
+        let storage = AgentBSdkStorage::new(db_for_task);
+        let merchant_id = std::env::var("AGENT_B_MERCHANT_ID")
+            .unwrap_or_else(|_| "agent-b".to_string());
+
+        let sdk = MerchantSdk::new(storage, &merchant_id);
+        let input = zk_agentic_sdk::EnrollMerchantInput {
+            email: email_for_task,
+            otp,
+            chain_id,
+        };
+
+        if reenroll {
+            sdk.recover_merchant(input)
+        } else {
+            sdk.enroll_merchant(input)
+        }
+    })
+    .await;
+
+    match result {
+        Ok(Ok(result)) => {
+            // Also persist chain_id to DB
+            if let Err(e) = db.set("chain_id", &result.chain_id.to_string()) {
+                tracing::error!("Failed to save chain_id: {}", e);
             }
-            // Also persist chain_id
-            let _ = db.set("chain_id", &result.chain_id.to_string());
 
             // Update env var so X402Config::from_env() picks up the new wallet
             std::env::set_var("MERCHANT_WALLET_ADDRESS", &result.wallet_address);
 
             tracing::info!(
                 wallet = %result.wallet_address,
-                email = %result.email,
+                email = %email,
                 chain_id = result.chain_id,
-                "Merchant wallet enrolled and saved"
+                action = if reenroll { "re-enrolled" } else { "enrolled" },
+                "Merchant wallet enrollment completed"
             );
 
             (
                 StatusCode::OK,
                 Json(json!({
                     "wallet_address": result.wallet_address,
-                    "email": result.email,
+                    "email": email,
                     "chain_id": result.chain_id,
                 })),
             )
         }
-        Err(e) => (
+        Ok(Err(e)) => (
             StatusCode::BAD_REQUEST,
-            Json(json!({ "error": e })),
+            Json(json!({ "error": format!("{:?}", e) })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("spawn_blocking failed: {:?}", e) })),
         ),
     }
 }
@@ -2833,6 +3544,245 @@ pub async fn handle_verify_otp(
 pub async fn handle_api_products() -> Json<serde_json::Value> {
     let catalog = farm_core::catalog::get_catalog();
     Json(serde_json::to_value(&catalog).unwrap_or(json!([])))
+}
+
+/// POST /api/discovery/products — discovery-facing products with signed quote envelopes.
+pub async fn handle_discovery_list_products(
+    State(db): State<SharedMerchantDb>,
+    Json(req): Json<DiscoveryListProductsRequest>,
+) -> Result<Json<FarmToolResponse>, (StatusCode, Json<FarmToolResponse>)> {
+    let merchant_id = std::env::var("AGENT_B_MERCHANT_ID")
+        .unwrap_or_else(|_| "agent-b".to_string());
+    let merchant_handle = std::env::var("AGENT_B_MERCHANT_HANDLE")
+        .unwrap_or_else(|_| "agent-b".to_string());
+    let merchant_mcp_url = std::env::var("AGENT_B_MCP_BASE_URL")
+        .unwrap_or_else(|_| {
+            let port = std::env::var("PORT").unwrap_or_else(|_| "8001".to_string());
+            format!("http://localhost:{}", port)
+        });
+
+    tracing::info!(
+        tool = "discovery-list-products",
+        request_id = ?req.request_id,
+        merchant_id = %merchant_id,
+        query = ?req.query,
+        department = ?req.department,
+        category = ?req.category,
+        product_type = ?req.product_type,
+        limit = ?req.limit,
+        "Discovery request received"
+    );
+
+    let query_tokens = parse_query_tokens(&req.query);
+    let required_features: Vec<String> = req
+        .features
+        .iter()
+        .map(|f| f.trim().to_lowercase())
+        .filter(|f| !f.is_empty())
+        .collect();
+
+    let department_slug = match req
+        .department
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_lowercase())
+    {
+        Some(value) => value,
+        None => {
+            tracing::warn!(
+                tool = "discovery-list-products",
+                request_id = ?req.request_id,
+                merchant_id = %merchant_id,
+                "Rejecting discovery request: missing department"
+            );
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(FarmToolResponse::err(
+                    400,
+                    "department is required for discovery-list-products".to_string(),
+                )),
+            ));
+        }
+    };
+
+    let category_slug = match req
+        .category
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_lowercase())
+    {
+        Some(value) => value,
+        None => {
+            tracing::warn!(
+                tool = "discovery-list-products",
+                request_id = ?req.request_id,
+                merchant_id = %merchant_id,
+                department = %department_slug,
+                "Rejecting discovery request: missing category"
+            );
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(FarmToolResponse::err(
+                    400,
+                    "category is required for discovery-list-products".to_string(),
+                )),
+            ));
+        }
+    };
+
+    let product_type_slug = match req
+        .product_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_lowercase())
+    {
+        Some(value) => value,
+        None => {
+            tracing::warn!(
+                tool = "discovery-list-products",
+                request_id = ?req.request_id,
+                merchant_id = %merchant_id,
+                department = %department_slug,
+                category = %category_slug,
+                "Rejecting discovery request: missing product_type"
+            );
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(FarmToolResponse::err(
+                    400,
+                    "product_type is required for discovery-list-products".to_string(),
+                )),
+            ));
+        }
+    };
+
+    let limit = req.limit.unwrap_or(20).max(1).min(100);
+    let request_prefix = req.request_id.clone().unwrap_or_else(|| "discover".to_string());
+
+    let mut products = Vec::new();
+    let mut scanned = 0usize;
+    let mut filtered_by_price = 0usize;
+    let mut filtered_by_query = 0usize;
+    let mut filtered_by_features = 0usize;
+    let mut unsigned_quotes = 0usize;
+    let mut signing_degraded = false;
+
+    for product in list_products(None) {
+        scanned += 1;
+
+        let stock_status = if product.in_stock { "in_stock" } else { "out_of_stock" };
+        let unit_price = product.price_cents as f64 / 100.0;
+        let features = vec![
+            category_slug.clone(),
+            product_type_slug.clone(),
+            if product.in_stock { "in_stock".to_string() } else { "out_of_stock".to_string() },
+        ];
+
+        if let Some(min_price) = req.price_min {
+            if unit_price < min_price {
+                filtered_by_price += 1;
+                continue;
+            }
+        }
+        if let Some(max_price) = req.price_max {
+            if unit_price > max_price {
+                filtered_by_price += 1;
+                continue;
+            }
+        }
+
+        let text_blob = product_text_blob(&product.id, &product.name, &category_slug, &features);
+        if !query_tokens.is_empty() && !query_tokens.iter().any(|token| text_blob.contains(token)) {
+            filtered_by_query += 1;
+            continue;
+        }
+        if !required_features.is_empty() && !required_features.iter().all(|f| text_blob.contains(f)) {
+            filtered_by_features += 1;
+            continue;
+        }
+
+        let external_id = format!("{}-{}", request_prefix, product.id);
+        let quote = build_checkout_quote_envelope(
+            &db,
+            &external_id,
+            unit_price,
+            "USD",
+            Some(&product.id),
+            signing_degraded,
+        ).await;
+
+        let has_signature = quote
+            .get("signature")
+            .map(|sig| !sig.is_null())
+            .unwrap_or(false);
+        if !has_signature {
+            unsigned_quotes += 1;
+            if !signing_degraded {
+                signing_degraded = true;
+                tracing::warn!(
+                    tool = "discovery-list-products",
+                    request_id = ?req.request_id,
+                    merchant_id = %merchant_id,
+                    "Disabling quote signing for remaining products in this request"
+                );
+            }
+            tracing::warn!(
+                tool = "discovery-list-products",
+                request_id = ?req.request_id,
+                merchant_id = %merchant_id,
+                product_id = %product.id,
+                "Returning product with unsigned quote envelope"
+            );
+        }
+
+        products.push(json!({
+            "product_id": product.id,
+            "merchant_product_id": product.id,
+            "merchant_id": merchant_id,
+            "merchant_handle": merchant_handle,
+            "merchant_mcp_url": merchant_mcp_url,
+            "title": product.name,
+            "description": product.description,
+            "price": unit_price,
+            "currency": "USD",
+            "department_slug": department_slug,
+            "category_slug": category_slug,
+            "product_type_slug": product_type_slug,
+            "stock_status": stock_status,
+            "features": features,
+            "agent_friendly": true,
+            "quote": quote,
+        }));
+
+        if products.len() >= limit {
+            break;
+        }
+    }
+
+    let matched_before_limit = products.len();
+    let limited = products;
+
+    tracing::info!(
+        tool = "discovery-list-products",
+        request_id = ?req.request_id,
+        merchant_id = %merchant_id,
+        department = %department_slug,
+        category = %category_slug,
+        product_type = %product_type_slug,
+        scanned,
+        filtered_by_price,
+        filtered_by_query,
+        filtered_by_features,
+        matched_before_limit,
+        returned = limited.len(),
+        unsigned_quotes,
+        "Discovery request completed"
+    );
+
+    Ok(Json(FarmToolResponse::ok(json!({ "products": limited }))))
 }
 
 /// GET /api/merchant/balance — fetch ETH + USDC balances across all chains

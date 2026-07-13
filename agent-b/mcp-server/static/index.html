@@ -64,6 +64,17 @@
       font-size: 0.8rem;
     }
     .wallet-badge .copy-btn:hover { opacity: 1; }
+    .wallet-action-btn {
+      background: transparent;
+      color: white;
+      border: 1px solid rgba(255,255,255,0.35);
+      padding: 0.45rem 0.8rem;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 0.85rem;
+      font-weight: 600;
+    }
+    .wallet-action-btn:hover { background: rgba(255,255,255,0.12); }
     .balance-popover {
       display: none;
       position: absolute;
@@ -564,6 +575,9 @@
           </div>
         </div>
       </div>
+      <button class="wallet-action-btn" id="reenrollBtn" style="display:none;" onclick="openEnrollModal('reenroll')">
+        Re-enroll Wallet
+      </button>
       <button class="cart-btn" onclick="toggleCart()">
         🛒 Cart (<span id="cartCount">0</span>)
       </button>
@@ -630,8 +644,8 @@
     <div class="modal">
       <!-- Step 1: Email -->
       <div id="enrollStep1">
-        <h2>🔐 Set Up Merchant Wallet</h2>
-        <p>Enter your email to receive a verification code. This creates a secure MPC wallet for receiving crypto payments.</p>
+        <h2 id="enrollStep1Title">🔐 Set Up Merchant Wallet</h2>
+        <p id="enrollStep1Copy">Enter your email to receive a verification code. This creates a secure MPC wallet for receiving crypto payments.</p>
         <div class="error" id="otpError"></div>
         <label for="merchantEmail">Email Address</label>
         <input type="email" id="merchantEmail" placeholder="farmer@greenacres.com" />
@@ -734,6 +748,7 @@
       badge.onclick = toggleBalancePopover;
       badge.innerHTML = addr.slice(0, 6) + '…' + addr.slice(-4)
         + '<span class="copy-btn" title="Copy wallet address" onclick="event.stopPropagation(); copyWallet()">📋</span>';
+      document.getElementById('reenrollBtn').style.display = 'inline-block';
       document.getElementById('enrollBanner').classList.remove('show');
       fetchBalance();
     }
@@ -995,12 +1010,23 @@
 
     // ── Enrollment ────────────────────────────────────────
     let enrollEmail = '';
+    let enrollmentMode = 'enroll';
 
-    function openEnrollModal() {
+    function openEnrollModal(mode = 'enroll') {
+      enrollmentMode = mode;
       document.getElementById('enrollModal').classList.add('open');
       document.getElementById('enrollStep1').style.display = 'block';
       document.getElementById('enrollStep2').style.display = 'none';
       document.getElementById('enrollStep3').style.display = 'none';
+      document.getElementById('enrollStep1Title').textContent = mode === 'reenroll'
+        ? '🔄 Re-enroll Merchant Wallet'
+        : '🔐 Set Up Merchant Wallet';
+      document.getElementById('enrollStep1Copy').textContent = mode === 'reenroll'
+        ? 'Enter your email to receive a verification code. This will recover your merchant wallet through the SDK re-enroll path.'
+        : 'Enter your email to receive a verification code. This creates a secure MPC wallet for receiving crypto payments.';
+      document.getElementById('verifyOtpBtn').textContent = mode === 'reenroll'
+        ? 'Verify & Re-enroll Wallet'
+        : 'Verify & Create Wallet';
     }
 
     function closeEnrollModal() {
@@ -1060,12 +1086,16 @@
 
       const btn = document.getElementById('verifyOtpBtn');
       const spinner = document.getElementById('verifySpinner');
+      const originalBtnText = btn.textContent;
       btn.style.display = 'none';
       spinner.style.display = 'block';
+      spinner.textContent = enrollmentMode === 'reenroll'
+        ? 'Recovering wallet (this may take ~15s)...'
+        : 'Creating wallet (this may take ~15s)...';
       hideError('verifyError');
 
       try {
-        const resp = await fetch('/api/merchant/verify-otp', {
+        const resp = await fetch(enrollmentMode === 'reenroll' ? '/api/merchant/re-enroll' : '/api/merchant/verify-otp', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ email: enrollEmail, otp })
@@ -1079,11 +1109,19 @@
         document.getElementById('walletDisplay').textContent = data.wallet_address;
         document.getElementById('enrollStep2').style.display = 'none';
         document.getElementById('enrollStep3').style.display = 'block';
+        document.querySelector('#enrollStep3 h2').textContent = enrollmentMode === 'reenroll'
+          ? '✅ Wallet Re-enrolled!'
+          : '✅ Wallet Created!';
+        document.querySelector('#enrollStep3 p').textContent = enrollmentMode === 'reenroll'
+          ? 'Your merchant wallet has been recovered and is ready to receive payments.'
+          : 'Your merchant wallet is ready to receive payments.';
       } catch (e) {
         showError('verifyError', e.message);
       } finally {
         btn.style.display = '';
         spinner.style.display = 'none';
+        spinner.textContent = 'Creating wallet (this may take ~15s)...';
+        btn.textContent = originalBtnText;
       }
     }
 

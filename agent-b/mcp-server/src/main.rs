@@ -446,6 +446,13 @@ async fn dispatch_farm_tool(
             let axum::Json(r) = handlers::handle_list_products(Json(req)).await;
             r
         }
+        "discovery-list-products" => {
+            let req: handlers::DiscoveryListProductsRequest = serde_json::from_value(args_value).ok()?;
+            match handlers::handle_discovery_list_products(State(merchant_db), Json(req)).await {
+                Ok(axum::Json(r)) => r,
+                Err((_, axum::Json(r))) => r,
+            }
+        }
         "farm-get-product" => {
             let req: handlers::GetProductRequest = serde_json::from_value(args_value).ok()?;
             match handlers::handle_get_product(Json(req)).await {
@@ -504,6 +511,34 @@ async fn dispatch_farm_tool(
             let req: handlers::ClearCartRequest = serde_json::from_value(args_value).ok()?;
             let axum::Json(r) = handlers::handle_clear_cart(State(farm_state), Json(req)).await;
             r
+        }
+        "checkout_prepare" => {
+            let req: handlers::ContractCheckoutPrepareRequest = serde_json::from_value(args_value).ok()?;
+            match handlers::handle_contract_checkout_prepare(State(farm_state), State(merchant_db), Json(req)).await {
+                Ok(axum::Json(r)) => r,
+                Err((_, axum::Json(r))) => r,
+            }
+        }
+        "checkout_finalize" => {
+            let req: handlers::ContractCheckoutFinalizeRequest = serde_json::from_value(args_value).ok()?;
+            match handlers::handle_contract_checkout_finalize(State(farm_state), State(merchant_db), Json(req)).await {
+                Ok(axum::Json(r)) => r,
+                Err((_, axum::Json(r))) => r,
+            }
+        }
+        "checkout_cancel" => {
+            let req: handlers::ContractCheckoutCancelRequest = serde_json::from_value(args_value).ok()?;
+            match handlers::handle_contract_checkout_cancel(State(farm_state), Json(req)).await {
+                Ok(axum::Json(r)) => r,
+                Err((_, axum::Json(r))) => r,
+            }
+        }
+        "checkout_status" => {
+            let req: handlers::ContractCheckoutStatusRequest = serde_json::from_value(args_value).ok()?;
+            match handlers::handle_contract_checkout_status(State(farm_state), Json(req)).await {
+                Ok(axum::Json(r)) => r,
+                Err((_, axum::Json(r))) => r,
+            }
         }
         _ => return None,
     };
@@ -969,6 +1004,7 @@ async fn main() -> Result<()> {
         .route("/tools/get-ticket-price", post(get_ticket_price))
         .route("/tools/book-flight", post(book_flight))
         .route("/tools/farm-list-products", post(handlers::handle_list_products))
+        .route("/tools/discovery-list-products", post(handlers::handle_discovery_list_products))
         .route("/tools/farm-get-product", post(handlers::handle_get_product))
         .route("/tools/farm-add-to-cart", post(handlers::handle_add_to_cart))
         .route("/tools/farm-view-cart", post(handlers::handle_view_cart))
@@ -986,7 +1022,9 @@ async fn main() -> Result<()> {
         .route("/api/merchant/balance", get(handlers::handle_merchant_balance))
         .route("/api/merchant/send-otp", post(handlers::handle_send_otp))
         .route("/api/merchant/verify-otp", post(handlers::handle_verify_otp))
+        .route("/api/merchant/re-enroll", post(handlers::handle_reenroll_merchant))
         .route("/api/products", get(handlers::handle_api_products))
+        .route("/api/discovery/products", post(handlers::handle_discovery_list_products))
         .route("/api/products/:id/chains", get(handlers::handle_get_product_chains))
         .route("/api/products/:id/chains", put(handlers::handle_set_product_chains))
         // Orders API
@@ -1032,10 +1070,12 @@ async fn main() -> Result<()> {
     println!("  GET  /api/merchant/status        — Merchant wallet status");
     println!("  POST /api/merchant/send-otp      — Send enrollment OTP");
     println!("  POST /api/merchant/verify-otp    — Verify OTP & create wallet");
+    println!("  POST /api/merchant/re-enroll     — Verify OTP & recover wallet");
     println!("  GET  /tools                     — List all tools");
     println!("  POST /tools/get-ticket-price    — Get flight pricing");
     println!("  POST /tools/book-flight         — Book a flight");
     println!("  POST /tools/farm-list-products  — List farm products");
+    println!("  POST /tools/discovery-list-products — Discovery products with signed quotes");
     println!("  POST /tools/farm-get-product    — Get product details");
     println!("  POST /tools/farm-add-to-cart    — Add to cart");
     println!("  POST /tools/farm-view-cart      — View cart");
